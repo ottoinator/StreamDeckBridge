@@ -13,7 +13,7 @@ const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
 const VALID_AGENT_STATUSES = new Set(["idle", "active", "error"]);
-const AGENT_ORDER = ["main", "noah", "carmen"];
+const AGENT_ORDER = ["noah", "carmen"];
 const execFileAsync = promisify(execFile);
 
 function nowIso() {
@@ -390,7 +390,7 @@ Commands:
   state
   clear --slot <1-4>
   set-status --slot <1-4> --status <idle|running|needs_input|error|done> [--label "..."] [--detail "..."] [--thread "..."] [--exit-code 0]
-  set-agent --agent <main|noah|carmen> --status <idle|active|error> [--label "..."] [--detail "..."]
+  set-agent --agent <noah|carmen> --status <idle|active|error> [--label "..."] [--detail "..."]
   heartbeat --slot <1-4>
   start --slot <1-4> --label "Build" --command "npm run build"
 

@@ -16,7 +16,7 @@ export type SlotState = {
 };
 
 export type AgentState = {
-  name: "main" | "noah" | "carmen";
+  name: "noah" | "carmen";
   label: string;
   status: AgentStatus;
   detail: string;
@@ -77,7 +77,7 @@ export function offlineState(): MonitorState {
       status: "error",
       detail: "Bridge offline"
     })),
-    agents: ["main", "noah", "carmen"].map(name => ({
+    agents: ["noah", "carmen"].map(name => ({
       ...defaultAgent(name as AgentState["name"]),
       status: "error",
       detail: "Bridge offline"
@@ -88,7 +88,7 @@ export function offlineState(): MonitorState {
 export function normalizeState(payload: unknown): MonitorState {
   const fallback = {
     slots: Array.from({ length: 4 }, (_, index) => defaultSlot(index + 1)),
-    agents: ["main", "noah", "carmen"].map(name => defaultAgent(name as AgentState["name"]))
+    agents: ["noah", "carmen"].map(name => defaultAgent(name as AgentState["name"]))
   };
 
   if (!payload || typeof payload !== "object") {

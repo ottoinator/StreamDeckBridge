@@ -5,7 +5,7 @@ Lokale Windows-Integration fuer Elgato Stream Deck und Codex.
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten plus 3 Agenten-Leuchten fuer `Main`, `Noah`, `Carmen`
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten plus 2 Agenten-Leuchten fuer `Noah` und `Carmen`
 
 ## Statusmodell
 
@@ -54,7 +54,7 @@ npm run bridge
 ```
 
 5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
-   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4` sowie `Main Light`, `Noah Light`, `Carmen Light`.
+   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4` sowie `Noah Light`, `Carmen Light`.
 
 ## Autostart ohne Shell-Fenster
 
@@ -112,13 +112,7 @@ Hinweis:
 
 ## Agenten-Leuchten
 
-`Main`, `Noah` und `Carmen` koennen als einfache Aktivitaetsleuchten genutzt werden.
-
-Main auf aktiv:
-
-```powershell
-node .\bridge\monitor-bridge.mjs set-agent --agent main --status active --detail "Arbeitet"
-```
+`Noah` und `Carmen` koennen als einfache Aktivitaetsleuchten genutzt werden.
 
 Noah auf inaktiv:
 

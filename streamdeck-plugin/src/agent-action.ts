@@ -7,7 +7,7 @@ type VisibleAction = KeyAction<Record<string, never>>;
 
 export abstract class BaseAgentAction extends SingletonAction<Record<string, never>> {
   private static readonly visibleActions = new Map<string, Map<string, VisibleAction>>();
-  private static currentAgents = ["main", "noah", "carmen"].map(name => defaultAgent(name as AgentState["name"]));
+  private static currentAgents = ["noah", "carmen"].map(name => defaultAgent(name as AgentState["name"]));
 
   readonly agentName: AgentState["name"];
 

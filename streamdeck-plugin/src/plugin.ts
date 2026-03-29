@@ -1,7 +1,6 @@
 import streamDeck from "@elgato/streamdeck";
 
 import { CarmenLightAction } from "./actions/carmen-light";
-import { MainLightAction } from "./actions/main-light";
 import { NoahLightAction } from "./actions/noah-light";
 import { Slot1Action } from "./actions/slot-1";
 import { Slot2Action } from "./actions/slot-2";
@@ -17,7 +16,6 @@ streamDeck.actions.registerAction(new Slot1Action());
 streamDeck.actions.registerAction(new Slot2Action());
 streamDeck.actions.registerAction(new Slot3Action());
 streamDeck.actions.registerAction(new Slot4Action());
-streamDeck.actions.registerAction(new MainLightAction());
 streamDeck.actions.registerAction(new NoahLightAction());
 streamDeck.actions.registerAction(new CarmenLightAction());
 
