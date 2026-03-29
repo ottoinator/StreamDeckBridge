@@ -1,5 +1,5 @@
 export type SlotStatus = "idle" | "running" | "needs_input" | "error" | "done";
-export type AgentStatus = "idle" | "active" | "error";
+export type AgentStatus = "online" | "attention" | "offline";
 
 export type SlotState = {
   slot: number;
@@ -22,6 +22,9 @@ export type AgentState = {
   detail: string;
   updatedAt: string;
   lastSeenAt?: string | null;
+  heartbeatAt?: string | null;
+  activity?: boolean;
+  blinkUntil?: string | null;
 };
 
 export type MonitorState = {
@@ -40,10 +43,10 @@ const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: 
   done: { title: "FERTIG", color: "#2e7d32", dot: "#a5d6a7" }
 };
 
-const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dot: string }> = {
-  idle: { title: "INAKTIV", color: "#4b5563", dot: "#9ca3af" },
-  active: { title: "AKTIV", color: "#1b5e20", dot: "#8bc34a" },
-  error: { title: "STOERUNG", color: "#7f1d1d", dot: "#ef9a9a" }
+const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dimColor: string; dot: string; dimDot: string }> = {
+  online: { title: "ONLINE", color: "#14532d", dimColor: "#0b2e1a", dot: "#86efac", dimDot: "#1f6b3a" },
+  attention: { title: "ACHTUNG", color: "#a16207", dimColor: "#6c4305", dot: "#fde047", dimDot: "#8a6708" },
+  offline: { title: "OFFLINE", color: "#7f1d1d", dimColor: "#4d1010", dot: "#fca5a5", dimDot: "#5f1414" }
 };
 
 export function defaultSlot(slot: number): SlotState {
@@ -63,10 +66,13 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
   return {
     name,
     label: name.charAt(0).toUpperCase() + name.slice(1),
-    status: "idle",
-    detail: "Inaktiv",
+    status: "offline",
+    detail: "Offline",
     updatedAt: new Date(0).toISOString(),
-    lastSeenAt: null
+    lastSeenAt: null,
+    heartbeatAt: null,
+    activity: false,
+    blinkUntil: null
   };
 }
 
@@ -79,10 +85,24 @@ export function offlineState(): MonitorState {
     })),
     agents: ["noah", "carmen"].map(name => ({
       ...defaultAgent(name as AgentState["name"]),
-      status: "error",
+      status: "offline",
       detail: "Bridge offline"
     }))
   };
+}
+
+function normalizeAgentStatus(status: unknown): AgentStatus {
+  const raw = String(status || "").toLowerCase();
+  if (raw === "active") {
+    return "online";
+  }
+  if (raw === "error") {
+    return "attention";
+  }
+  if (raw === "idle") {
+    return "offline";
+  }
+  return raw === "online" || raw === "attention" || raw === "offline" ? raw : "offline";
 }
 
 export function normalizeState(payload: unknown): MonitorState {
@@ -130,9 +150,11 @@ export function normalizeState(payload: unknown): MonitorState {
         name: item.name,
         label: String(agent.label || item.label),
         detail: String(agent.detail || item.detail),
-        status: (["idle", "active", "error"].includes(String(agent.status))
-          ? agent.status
-          : item.status) as AgentStatus
+        status: normalizeAgentStatus(agent.status ?? item.status),
+        lastSeenAt: typeof agent.lastSeenAt === "string" ? agent.lastSeenAt : item.lastSeenAt,
+        heartbeatAt: typeof agent.heartbeatAt === "string" ? agent.heartbeatAt : item.heartbeatAt,
+        activity: Boolean(agent.activity),
+        blinkUntil: typeof agent.blinkUntil === "string" ? agent.blinkUntil : item.blinkUntil
       };
     })
   };
@@ -193,6 +215,24 @@ function formatDuration(startedAt?: string | null): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function isBlinkPhaseOn(): boolean {
+  return Math.floor(Date.now() / 500) % 2 === 0;
+}
+
+function isAgentBlinking(agent: AgentState): boolean {
+  if (agent.status === "attention") {
+    return true;
+  }
+  if (agent.activity) {
+    return true;
+  }
+  if (!agent.blinkUntil) {
+    return false;
+  }
+  const until = Date.parse(agent.blinkUntil);
+  return !Number.isNaN(until) && until > Date.now();
+}
+
 export function slotSvg(slot: SlotState): string {
   const meta = SLOT_STATUS_META[slot.status];
   const titleLines = wrapText(slot.label || `Codex ${slot.slot}`, 10, 2);
@@ -224,6 +264,13 @@ export function agentSvg(agent: AgentState): string {
   const meta = AGENT_STATUS_META[agent.status];
   const titleLines = wrapText(agent.label, 10, 2);
   const detailLines = wrapText(agent.detail || meta.title, 12, 2);
+  const blinkOn = isBlinkPhaseOn();
+  const isBlinking = isAgentBlinking(agent);
+  const backgroundColor = isBlinking && !blinkOn ? meta.dimColor : meta.color;
+  const lampColor = isBlinking && !blinkOn ? meta.dimDot : meta.dot;
+  const haloOpacity = isBlinking ? (blinkOn ? "0.34" : "0.05") : "0.18";
+  const lampRadius = isBlinking ? (blinkOn ? 10 : 6) : 8;
+  const footer = agent.status === "online" && isBlinking ? "AKTIV" : meta.title;
 
   const titleSvg = titleLines
     .map((line, index) => `<text x="36" y="${20 + index * 10}" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
@@ -234,10 +281,11 @@ export function agentSvg(agent: AgentState): string {
 
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
-      <rect width="72" height="72" rx="12" fill="${meta.color}" />
-      <circle cx="36" cy="28" r="14" fill="rgba(255,255,255,0.14)" />
-      <circle cx="36" cy="28" r="8" fill="${meta.dot}" />
-      <text x="36" y="66" text-anchor="middle" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(meta.title)}</text>
+      <rect width="72" height="72" rx="12" fill="${backgroundColor}" />
+      <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.06)" />
+      <circle cx="36" cy="28" r="16" fill="rgba(255,255,255,${haloOpacity})" />
+      <circle cx="36" cy="28" r="${lampRadius}" fill="${lampColor}" />
+      <text x="36" y="66" text-anchor="middle" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(footer)}</text>
       ${titleSvg}
       ${detailSvg}
     </svg>

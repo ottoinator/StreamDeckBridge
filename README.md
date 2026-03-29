@@ -108,22 +108,39 @@ node .\bridge\monitor-bridge.mjs clear --slot 1
 Hinweis:
 
 - bewusst gesetzte `running`-Slots zeigen auf dem Stream Deck die Laufzeit statt einer Uhrzeit
-- zusaetzliche erkannte Codex-Prozesse koennen freie Slots automatisch als `Codex aktiv` belegen
+- freie Slots bleiben leer, solange du sie nicht bewusst belegst
 
 ## Agenten-Leuchten
 
-`Noah` und `Carmen` koennen als einfache Aktivitaetsleuchten genutzt werden.
+`Noah` und `Carmen` nutzen jetzt dieses Modell:
 
-Noah auf inaktiv:
+- `online`: gruen
+- `online` mit `--activity true`: gruen blinkend
+- `attention`: gelb blinkend
+- `offline`: rot
+
+Noah auf online:
 
 ```powershell
-node .\bridge\monitor-bridge.mjs set-agent --agent noah --status idle --detail "Inaktiv"
+node .\bridge\monitor-bridge.mjs set-agent --agent noah --status online --detail "Bereit"
 ```
 
-Carmen auf Fehler:
+Carmen mit Handlungsbedarf:
 
 ```powershell
-node .\bridge\monitor-bridge.mjs set-agent --agent carmen --status error --detail "Stoerung"
+node .\bridge\monitor-bridge.mjs set-agent --agent carmen --status attention --detail "Rueckfrage offen"
+```
+
+Noah verarbeitet gerade Daten:
+
+```powershell
+node .\bridge\monitor-bridge.mjs heartbeat-agent --agent noah --activity true --detail "Verarbeitet Daten"
+```
+
+Agent auf offline:
+
+```powershell
+node .\bridge\monitor-bridge.mjs set-agent --agent noah --status offline --detail "Nicht verfuegbar"
 ```
 
 ## Ueber die Bridge starten
@@ -152,7 +169,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/slots/3 -ContentType '
 ```
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/agents/main -ContentType 'application/json' -Body '{"status":"active","detail":"Arbeitet","label":"Main"}'
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/agents/noah -ContentType 'application/json' -Body '{"status":"online","detail":"Verarbeitet Daten","activity":true,"label":"Noah"}'
 ```
 
 ## Persistenz
@@ -161,6 +178,10 @@ Der letzte Zustand liegt hier:
 
 ```text
 %APPDATA%\CodexStreamDeckMonitor\slots.json
+```
+
+```text
+%APPDATA%\CodexStreamDeckMonitor\agents.json
 ```
 
 Damit bleibt der Status auch nach einem Stream-Deck-Neustart erhalten.

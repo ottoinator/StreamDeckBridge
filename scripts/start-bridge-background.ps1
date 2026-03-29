@@ -7,12 +7,13 @@ $LogDir = Join-Path $Root "logs"
 $OutLog = Join-Path $LogDir "bridge.out.log"
 $ErrLog = Join-Path $LogDir "bridge.err.log"
 
-$existing = Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match 'node(.exe)?' -and $_.CommandLine -match 'monitor-bridge\.mjs'
-}
-if ($existing) {
-    Write-Host "Codex Monitor Bridge laeuft bereits."
-    exit 0
+try {
+    $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:4567/health" -TimeoutSec 2
+    if ($health.StatusCode -eq 200) {
+        Write-Host "Codex Monitor Bridge laeuft bereits."
+        exit 0
+    }
+} catch {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
@@ -10,11 +10,46 @@ const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
 const DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
 const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
+const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
+const CODEX_LOG_ROOT = path.join(
+  process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
+  "Packages",
+  "OpenAI.Codex_2p2nqsd0c76g0",
+  "LocalCache",
+  "Local",
+  "Codex",
+  "Logs"
+);
 const HEARTBEAT_TIMEOUT_MS = 30_000;
+const ENABLE_PROCESS_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_PROCESSES === "1";
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
-const VALID_AGENT_STATUSES = new Set(["idle", "active", "error"]);
+const VALID_AGENT_STATUSES = new Set(["online", "attention", "offline"]);
 const AGENT_ORDER = ["noah", "carmen"];
 const execFileAsync = promisify(execFile);
+const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
+const AGENT_PROBE_TTL_MS = 15_000;
+const THREAD_RUNNING_WINDOW_MS = 300_000;
+const SECONDARY_THREAD_RUNNING_WINDOW_MS = 90_000;
+const THREAD_DONE_WINDOW_MS = 120_000;
+const AGENT_ACTIVITY_WINDOW_MS = 600_000;
+const AGENT_REMOTE_DEFAULTS = {
+  noah: {
+    kind: "ssh-json",
+    host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || "ocvps",
+    command:
+      process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND ||
+      "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
+  },
+  carmen: {
+    kind: "ssh-json",
+    host: process.env.CODEX_MONITOR_CARMEN_SSH_HOST || "carmen-vps",
+    command:
+      process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND ||
+      "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
+  }
+};
+const agentProbeCache = new Map();
+const agentProbeInflight = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -52,7 +87,8 @@ function createDefaultSlot(slot) {
     threadOrTaskId: "",
     exitCode: null,
     pid: null,
-    heartbeatAt: null
+    heartbeatAt: null,
+    source: "manual"
   };
 }
 
@@ -60,10 +96,13 @@ function createDefaultAgent(name) {
   return {
     name,
     label: agentLabel(name),
-    status: "idle",
-    detail: "Inaktiv",
+    status: "offline",
+    detail: "Offline",
     updatedAt: nowIso(),
-    lastSeenAt: null
+    lastSeenAt: null,
+    heartbeatAt: null,
+    activity: false,
+    blinkUntil: null
   };
 }
 
@@ -87,6 +126,12 @@ async function ensureDataFile() {
       `${JSON.stringify(AGENT_ORDER.map(name => createDefaultAgent(name)), null, 2)}\n`,
       "utf8"
     );
+  }
+
+  try {
+    await readFile(THREAD_NAMES_FILE, "utf8");
+  } catch {
+    await writeFile(THREAD_NAMES_FILE, "{}\n", "utf8");
   }
 }
 
@@ -134,7 +179,12 @@ async function readAgents() {
   return AGENT_ORDER.map((name, index) => ({
     ...createDefaultAgent(name),
     ...agents[index],
-    name
+    name,
+    status: normalizeAgentStatus(agents[index]?.status ?? "offline"),
+    heartbeatAt: agents[index]?.heartbeatAt ? toIsoDate(agents[index].heartbeatAt) : null,
+    lastSeenAt: agents[index]?.lastSeenAt ? toIsoDate(agents[index].lastSeenAt) : null,
+    activity: Boolean(agents[index]?.activity),
+    blinkUntil: agents[index]?.blinkUntil ? toIsoDate(agents[index].blinkUntil) : null
   }));
 }
 
@@ -146,6 +196,23 @@ async function writeSlots(slots) {
 async function writeAgents(agents) {
   await ensureDataFile();
   await writeFile(AGENTS_FILE, `${JSON.stringify(agents, null, 2)}\n`, "utf8");
+}
+
+async function readThreadNames() {
+  await ensureDataFile();
+  try {
+    const raw = await readFile(THREAD_NAMES_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    await writeFile(THREAD_NAMES_FILE, "{}\n", "utf8");
+    return {};
+  }
+}
+
+async function writeThreadNames(threadNames) {
+  await ensureDataFile();
+  await writeFile(THREAD_NAMES_FILE, `${JSON.stringify(threadNames, null, 2)}\n`, "utf8");
 }
 
 function parseBody(req) {
@@ -196,10 +263,19 @@ function normalizeAgentName(value) {
 }
 
 function normalizeAgentStatus(value) {
-  if (!VALID_AGENT_STATUSES.has(value)) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const mapped =
+    normalized === "idle"
+      ? "offline"
+      : normalized === "active"
+        ? "online"
+        : normalized === "error"
+          ? "attention"
+          : normalized;
+  if (!VALID_AGENT_STATUSES.has(mapped)) {
     throw new Error(`agent status must be one of: ${Array.from(VALID_AGENT_STATUSES).join(", ")}`);
   }
-  return value;
+  return mapped;
 }
 
 function applyPatch(slot, patch) {
@@ -224,6 +300,7 @@ function applyPatch(slot, patch) {
   }
   if (patch.heartbeatAt !== undefined) next.heartbeatAt = patch.heartbeatAt;
   if (patch.startedAt !== undefined) next.startedAt = patch.startedAt;
+  if (patch.source !== undefined) next.source = patch.source;
   next.updatedAt = patch.updatedAt || nowIso();
   return next;
 }
@@ -234,6 +311,9 @@ function applyAgentPatch(agent, patch) {
   if (patch.status !== undefined) next.status = normalizeAgentStatus(String(patch.status));
   if (patch.detail !== undefined) next.detail = String(patch.detail || "").trim();
   if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
+  if (patch.heartbeatAt !== undefined) next.heartbeatAt = patch.heartbeatAt;
+  if (patch.activity !== undefined) next.activity = Boolean(patch.activity);
+  if (patch.blinkUntil !== undefined) next.blinkUntil = patch.blinkUntil;
   next.updatedAt = patch.updatedAt || nowIso();
   return next;
 }
@@ -315,20 +395,503 @@ function overlayDiscoveredProcesses(slots, processes) {
       startedAt: processInfo.startedAt,
       pid: processInfo.pid,
       heartbeatAt: processInfo.startedAt,
-      autodetected: true
+      autodetected: true,
+      source: "process"
+    };
+  });
+}
+
+function chooseWorkspaceLabel(fileContent) {
+  const matches = Array.from(fileContent.matchAll(/cwd="([^"]+)"/g)).map(match => String(match[1] || ""));
+  if (!matches.length) {
+    return "";
+  }
+
+  const counts = new Map();
+  for (const rawPath of matches) {
+    const normalized = rawPath.replace(/[\\/]\.git$/i, "").replaceAll("/", path.sep);
+    const basename = path.basename(normalized);
+    if (!basename) {
+      continue;
+    }
+    counts.set(basename, (counts.get(basename) || 0) + 1);
+  }
+
+  return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] || "";
+}
+
+async function discoverCodexConversations() {
+  try {
+    const threadNames = await readThreadNames();
+    const date = new Date();
+    const dateDir = path.join(
+      CODEX_LOG_ROOT,
+      String(date.getFullYear()),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0")
+    );
+    const names = await readdir(dateDir);
+    const entries = await Promise.all(
+      names
+        .filter(name => name.startsWith("codex-desktop-") && name.endsWith(".log"))
+        .map(async name => {
+          const fullPath = path.join(dateDir, name);
+          const fileStat = await stat(fullPath);
+          return { fullPath, mtimeMs: fileStat.mtimeMs };
+        })
+    );
+    const recentFiles = entries.sort((left, right) => right.mtimeMs - left.mtimeMs).slice(0, 6);
+    const conversations = new Map();
+
+    for (const file of recentFiles) {
+      const content = await readFile(file.fullPath, "utf8");
+      const lines = content.split(/\r?\n/);
+
+      for (const line of lines) {
+        const eventMatch = line.match(
+          /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z).+conversationId=([0-9a-f-]+).+method=(turn\/start|turn\/steer|turn\/interrupt|thread\/metadata\/update|thread\/name\/set|thread\/rollback)/
+        );
+        if (eventMatch) {
+          const [, timestamp, conversationId, method] = eventMatch;
+          const current = conversations.get(conversationId) || {
+            conversationId,
+            updatedAt: timestamp,
+            lastMethod: method,
+            lastStartAt: null,
+            lastActivityAt: null,
+            lastStopAt: null,
+            filePath: file.fullPath
+          };
+          current.updatedAt = timestamp;
+          current.lastMethod = method;
+          current.filePath = file.fullPath;
+          if (method === "turn/start") {
+            current.lastStartAt = timestamp;
+            current.lastActivityAt = timestamp;
+          } else if (method === "turn/steer" || method === "thread/metadata/update") {
+            current.lastActivityAt = timestamp;
+          } else if (method === "turn/interrupt" || method === "thread/rollback") {
+            current.lastStopAt = timestamp;
+          }
+          conversations.set(conversationId, current);
+        }
+
+        const completeMatch = line.match(
+          /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z).+show turn-complete conversationId=([0-9a-f-]+)/
+        );
+        if (completeMatch) {
+          const [, timestamp, conversationId] = completeMatch;
+          const current = conversations.get(conversationId) || {
+            conversationId,
+            updatedAt: timestamp,
+            lastMethod: "turn/complete",
+            lastStartAt: null,
+            lastActivityAt: null,
+            lastStopAt: null,
+            filePath: file.fullPath
+          };
+          current.updatedAt = timestamp;
+          current.lastMethod = "turn/complete";
+          current.lastStopAt = timestamp;
+          current.filePath = file.fullPath;
+          conversations.set(conversationId, current);
+        }
+      }
+    }
+
+    const candidateConversations = Array.from(conversations.values())
+      .map(conversation => {
+        const lastStartMs = conversation.lastStartAt ? Date.parse(conversation.lastStartAt) : NaN;
+        const lastActivityMs = conversation.lastActivityAt ? Date.parse(conversation.lastActivityAt) : NaN;
+        const lastStopMs = conversation.lastStopAt ? Date.parse(conversation.lastStopAt) : NaN;
+        const latestRunSignalMs = Number.isNaN(lastActivityMs) ? lastStartMs : Math.max(lastStartMs, lastActivityMs);
+        const latestVisibleMs = Number.isNaN(latestRunSignalMs) ? Date.parse(conversation.updatedAt) : latestRunSignalMs;
+
+        if (Number.isNaN(latestVisibleMs)) {
+          return null;
+        }
+
+        let status = "running";
+        let detail = "Aktiver Thread";
+        if (!Number.isNaN(lastStopMs) && (Number.isNaN(latestRunSignalMs) || lastStopMs >= latestRunSignalMs)) {
+          if (Date.now() - lastStopMs > THREAD_DONE_WINDOW_MS) {
+            return null;
+          }
+          status = "done";
+          detail = "Antwort fertig";
+        }
+        else if (Date.now() - latestRunSignalMs > THREAD_RUNNING_WINDOW_MS) {
+          return null;
+        }
+        return {
+          ...conversation,
+          latestVisibleAt: new Date(latestVisibleMs).toISOString(),
+          status,
+          detail
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftMs = Date.parse(left.latestVisibleAt || left.updatedAt);
+        const rightMs = Date.parse(right.latestVisibleAt || right.updatedAt);
+        return rightMs - leftMs;
+      })
+      .map((conversation, index, list) => {
+        if (conversation.status !== "running" || index === 0) {
+          return conversation;
+        }
+
+        const freshest = list[0];
+        const freshnessAgeMs = Date.now() - Date.parse(conversation.latestVisibleAt || conversation.updatedAt);
+        const freshnessDeltaMs =
+          Date.parse(freshest.latestVisibleAt || freshest.updatedAt) -
+          Date.parse(conversation.latestVisibleAt || conversation.updatedAt);
+
+        if (freshnessAgeMs > SECONDARY_THREAD_RUNNING_WINDOW_MS || freshnessDeltaMs > SECONDARY_THREAD_RUNNING_WINDOW_MS) {
+          return {
+            ...conversation,
+            status: "done",
+            detail: "Antwort fertig"
+          };
+        }
+
+        return conversation;
+      })
+      .filter(conversation => {
+        if (conversation.status === "done") {
+          return Date.now() - Date.parse(conversation.latestVisibleAt || conversation.updatedAt) <= THREAD_DONE_WINDOW_MS;
+        }
+        return true;
+      });
+
+    const dedupedConversations = [];
+    const seenLabels = new Set();
+    for (const conversation of candidateConversations) {
+      const resolvedLabel = String(threadNames[conversation.conversationId] || "").trim();
+      const dedupeKey = resolvedLabel ? resolvedLabel.toLowerCase() : "";
+      if (dedupeKey && seenLabels.has(dedupeKey)) {
+        continue;
+      }
+      if (dedupeKey) {
+        seenLabels.add(dedupeKey);
+      }
+      dedupedConversations.push(conversation);
+    }
+
+    return dedupedConversations
+      .slice(0, 4)
+      .map((conversation, index) => ({
+        slot: index + 1,
+        label: String(threadNames[conversation.conversationId] || "").trim() || `Chat ${index + 1}`,
+        status: conversation.status,
+        detail: conversation.detail,
+        updatedAt: conversation.latestVisibleAt || conversation.updatedAt,
+        startedAt: conversation.lastStartAt || conversation.updatedAt,
+        threadOrTaskId: conversation.conversationId,
+        exitCode: null,
+        pid: null,
+        heartbeatAt: conversation.latestVisibleAt || conversation.updatedAt,
+        autodetected: false,
+        source: "codex"
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function overlayDiscoveredConversations(slots, conversations) {
+  const trackedThreads = new Set(slots.map(slot => slot.threadOrTaskId).filter(Boolean));
+  const candidates = conversations.filter(conversation => !trackedThreads.has(conversation.threadOrTaskId));
+  let candidateIndex = 0;
+
+  return slots.map(slot => {
+    if (slot.status !== "idle") {
+      return slot;
+    }
+    const conversation = candidates[candidateIndex];
+    if (!conversation) {
+      return slot;
+    }
+    candidateIndex += 1;
+    return {
+      ...slot,
+      ...conversation,
+      slot: slot.slot
     };
   });
 }
 
 async function loadEffectiveSlots() {
-  const slots = withHeartbeatTimeout(await readSlots());
-  await writeSlots(slots);
+  const storedSlots = withHeartbeatTimeout(await readSlots());
+  const cleanedSlots = storedSlots.map(slot => {
+    const isEphemeralSource = slot.source === "codex" || slot.source === "process";
+    const isLegacyCodexOverlay =
+      !slot.pid &&
+      typeof slot.threadOrTaskId === "string" &&
+      slot.threadOrTaskId &&
+      ["Aktiver Thread", "Antwort fertig"].includes(String(slot.detail || ""));
+    const isLegacyProcessOverlay =
+      slot.autodetected ||
+      (String(slot.detail || "") === "Codex aktiv" && /^Codex (Desktop|Service)/.test(String(slot.label || "")));
+
+    if (!isEphemeralSource && !isLegacyCodexOverlay && !isLegacyProcessOverlay) {
+      return slot;
+    }
+
+    return createDefaultSlot(slot.slot);
+  });
+
+  if (JSON.stringify(cleanedSlots) !== JSON.stringify(storedSlots)) {
+    await writeSlots(cleanedSlots);
+  }
+
+  const discoveredConversations = await discoverCodexConversations();
+  const withConversations = overlayDiscoveredConversations(cleanedSlots, discoveredConversations);
+  if (!ENABLE_PROCESS_AUTODETECT) {
+    return withConversations;
+  }
   const discoveredProcesses = await discoverCodexProcesses();
-  return overlayDiscoveredProcesses(slots, discoveredProcesses);
+  return overlayDiscoveredProcesses(withConversations, discoveredProcesses);
 }
 
 async function loadEffectiveAgents() {
-  return readAgents();
+  const agents = await readAgents();
+  const now = Date.now();
+  const heartbeatNormalized = agents.map(agent => {
+    if (agent.status === "offline" || !agent.heartbeatAt) {
+      return agent;
+    }
+    const age = now - Date.parse(agent.heartbeatAt);
+    if (Number.isNaN(age) || age <= AGENT_HEARTBEAT_TIMEOUT_MS) {
+      return agent;
+    }
+    return applyAgentPatch(agent, {
+      status: "offline",
+      detail: "Kein Signal",
+      activity: false,
+      heartbeatAt: null,
+      blinkUntil: null
+    });
+  });
+  const remotelyProbed = await overlayRemoteAgentStates(heartbeatNormalized);
+  await writeAgents(remotelyProbed);
+  return remotelyProbed;
+}
+
+function parseBooleanFlag(value, fallback = false) {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "ja", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "nein", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function futureIso(offsetMs) {
+  return new Date(Date.now() + offsetMs).toISOString();
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(4_000)
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function runSshJson(host, command) {
+  const { stdout } = await execFileAsync(
+    "ssh",
+    [host, command],
+    {
+      timeout: 8_000,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    }
+  );
+  const output = String(stdout || "").trim();
+  return output ? JSON.parse(output) : {};
+}
+
+function makeProbeResult(status, detail, extra = {}) {
+  return {
+    status,
+    detail,
+    checkedAt: nowIso(),
+    ...extra
+  };
+}
+
+function isRecentUnixTimestamp(value, thresholdSeconds) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return false;
+  }
+  return Date.now() - timestamp * 1000 <= thresholdSeconds * 1000;
+}
+
+function isRecentIsoTimestamp(value, thresholdMs = AGENT_ACTIVITY_WINDOW_MS) {
+  const timestamp = Date.parse(String(value || ""));
+  if (Number.isNaN(timestamp)) {
+    return false;
+  }
+  return Date.now() - timestamp <= thresholdMs;
+}
+
+async function probeNoahRemote() {
+  try {
+    const payload = await runSshJson(AGENT_REMOTE_DEFAULTS.noah.host, AGENT_REMOTE_DEFAULTS.noah.command);
+    const paperCycleMtime = payload?.paper_cycle?.mtime;
+    const mainBundleMtime = payload?.main_bundle?.mtime;
+    const companionLogMtime = payload?.companion_log?.mtime;
+    const companionAccessLogMtime = payload?.companion_access_log?.mtime;
+    const ownerHealthAlertStateMtime = payload?.owner_health_alert_state?.mtime;
+    const mainSessionsMtime = payload?.main_sessions?.mtime;
+    const latestSessionMtime = payload?.latest_session?.mtime;
+    const latestActivity = Math.max(
+      Number(paperCycleMtime || 0),
+      Number(mainBundleMtime || 0),
+      Number(companionLogMtime || 0),
+      Number(companionAccessLogMtime || 0),
+      Number(ownerHealthAlertStateMtime || 0),
+      Number(mainSessionsMtime || 0),
+      Number(latestSessionMtime || 0)
+    );
+    return makeProbeResult("online", "VPS erreichbar", {
+      activityMetric: String(latestActivity || 0),
+      recentActivity: isRecentUnixTimestamp(latestActivity, AGENT_ACTIVITY_WINDOW_MS / 1000)
+    });
+  } catch (error) {
+    return makeProbeResult("offline", `VPS offline: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function probeCarmenRemote() {
+  try {
+    const payload = await runSshJson(AGENT_REMOTE_DEFAULTS.carmen.host, AGENT_REMOTE_DEFAULTS.carmen.command);
+    const receiverOk = Boolean(payload?.receiver?.ok);
+    const nodeReady = Boolean(payload?.node?.ready);
+    const nodeAuthenticated = Boolean(payload?.node?.authenticated);
+    const mode = String(payload?.mode || payload?.node?.pushVNext?.runtimeMode || "online");
+    const lastAcceptedSeq = Number(payload?.receiver?.lastAcceptedSeq || 0);
+    const lastProcessedSeq = Number(payload?.receiver?.lastProcessedSeq || 0);
+    const latestSeq = Number(payload?.node?.latestSeq || 0);
+    const lastEventAt = payload?.node?.lastEventAt ? Date.parse(String(payload.node.lastEventAt)) : NaN;
+    const latestSessionMtime = Number(payload?.mainSessions?.latestMtime || 0);
+    const latestActivityFileMtime = Number(payload?.activityFiles?.latestMtime || 0);
+    const hasRecentActivity =
+      (!Number.isNaN(lastEventAt) && Date.now() - lastEventAt <= AGENT_ACTIVITY_WINDOW_MS) ||
+      isRecentIsoTimestamp(payload?.receiver?.lastAcceptedAt, AGENT_ACTIVITY_WINDOW_MS) ||
+      isRecentIsoTimestamp(payload?.receiver?.lastProcessedAt, AGENT_ACTIVITY_WINDOW_MS) ||
+      isRecentUnixTimestamp(latestSessionMtime, AGENT_ACTIVITY_WINDOW_MS / 1000) ||
+      isRecentUnixTimestamp(latestActivityFileMtime, AGENT_ACTIVITY_WINDOW_MS / 1000);
+
+    if (payload?.ok && receiverOk && nodeReady && nodeAuthenticated) {
+      return makeProbeResult("online", `VPS online (${mode})`, {
+        activityMetric: `${lastAcceptedSeq}:${lastProcessedSeq}:${latestSeq}:${latestSessionMtime}:${latestActivityFileMtime}`,
+        recentActivity: hasRecentActivity
+      });
+    }
+
+    if (payload?.ok) {
+      return makeProbeResult("attention", "Carmen laeuft, aber Transport ist nicht voll bereit");
+    }
+
+    return makeProbeResult("attention", "Carmen meldet Problem");
+  } catch (error) {
+    return makeProbeResult("offline", `VPS offline: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function probeRemoteAgent(name) {
+  if (name === "noah") {
+    return probeNoahRemote();
+  }
+  if (name === "carmen") {
+    return probeCarmenRemote();
+  }
+  return makeProbeResult("offline", "Keine Probe definiert");
+}
+
+async function getCachedAgentProbe(name) {
+  const cached = agentProbeCache.get(name);
+  if (cached && Date.now() - cached.cachedAt <= AGENT_PROBE_TTL_MS) {
+    return cached.result;
+  }
+
+  if (agentProbeInflight.has(name)) {
+    return agentProbeInflight.get(name);
+  }
+
+  const promise = probeRemoteAgent(name)
+    .then(result => {
+      const previousEntry = agentProbeCache.get(name);
+      agentProbeCache.set(name, {
+        cachedAt: Date.now(),
+        result,
+        previousResult: previousEntry?.result
+      });
+      agentProbeInflight.delete(name);
+      return result;
+    })
+    .catch(error => {
+      agentProbeInflight.delete(name);
+      const fallback = makeProbeResult("offline", `Probe fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`);
+      const previousEntry = agentProbeCache.get(name);
+      agentProbeCache.set(name, {
+        cachedAt: Date.now(),
+        result: fallback,
+        previousResult: previousEntry?.result
+      });
+      return fallback;
+    });
+
+  agentProbeInflight.set(name, promise);
+  return promise;
+}
+
+async function overlayRemoteAgentStates(agents) {
+  const results = await Promise.all(AGENT_ORDER.map(name => getCachedAgentProbe(name)));
+  return agents.map((agent, index) => {
+    const probe = results[index];
+    const next = { ...agent };
+    const previous = agentProbeCache.get(agent.name)?.previousResult;
+    const changedActivityMetric =
+      probe.activityMetric !== undefined &&
+      previous?.activityMetric !== undefined &&
+      probe.activityMetric !== previous.activityMetric;
+    const shouldBlink = Boolean(probe.recentActivity || changedActivityMetric);
+
+    if (probe.status === "offline") {
+      next.status = "offline";
+      next.detail = probe.detail;
+      next.activity = false;
+      next.blinkUntil = null;
+      next.heartbeatAt = null;
+      next.lastSeenAt = null;
+      next.updatedAt = probe.checkedAt;
+      return next;
+    }
+
+    next.status = probe.status;
+    next.detail = probe.detail;
+    next.updatedAt = probe.checkedAt;
+    next.lastSeenAt = probe.checkedAt;
+    next.activity = shouldBlink;
+    next.blinkUntil = shouldBlink ? futureIso(20_000) : null;
+    return next;
+  });
 }
 
 async function updateSlot(slotNumber, patch) {
@@ -346,6 +909,25 @@ async function updateAgent(agentName, patch) {
   agents[index] = applyAgentPatch(agents[index], patch);
   await writeAgents(agents);
   return agents[index];
+}
+
+async function setThreadName(threadId, label) {
+  const threadNames = await readThreadNames();
+  const normalizedThreadId = String(threadId || "").trim();
+  if (!normalizedThreadId) {
+    throw new Error("thread id is required");
+  }
+  const normalizedLabel = String(label || "").trim();
+  if (!normalizedLabel) {
+    delete threadNames[normalizedThreadId];
+  } else {
+    threadNames[normalizedThreadId] = normalizedLabel;
+  }
+  await writeThreadNames(threadNames);
+  return {
+    threadOrTaskId: normalizedThreadId,
+    label: threadNames[normalizedThreadId] || ""
+  };
 }
 
 function sendJson(res, statusCode, data) {
@@ -390,7 +972,10 @@ Commands:
   state
   clear --slot <1-4>
   set-status --slot <1-4> --status <idle|running|needs_input|error|done> [--label "..."] [--detail "..."] [--thread "..."] [--exit-code 0]
-  set-agent --agent <noah|carmen> --status <idle|active|error> [--label "..."] [--detail "..."]
+  set-agent --agent <noah|carmen> --status <online|attention|offline> [--label "..."] [--detail "..."] [--activity true]
+  heartbeat-agent --agent <noah|carmen> [--status <online|attention>] [--detail "..."] [--activity true]
+  pulse-agent --agent <noah|carmen> [--status <online|attention>] [--detail "..."]
+  set-thread-name --thread <conversation-id> --label "Kurzname"
   heartbeat --slot <1-4>
   start --slot <1-4> --label "Build" --command "npm run build"
 
@@ -429,7 +1014,8 @@ async function startCommand(args) {
     threadOrTaskId,
     exitCode: null,
     pid: child.pid,
-    heartbeatAt: nowIso()
+    heartbeatAt: nowIso(),
+    source: "manual"
   });
 
   const heartbeat = setInterval(() => {
@@ -438,7 +1024,8 @@ async function startCommand(args) {
       detail: "Laeuft",
       startedAt: null,
       pid: child.pid,
-      heartbeatAt: nowIso()
+      heartbeatAt: nowIso(),
+      source: "manual"
     }).catch(() => {});
   }, 5_000);
 
@@ -450,7 +1037,8 @@ async function startCommand(args) {
       startedAt: null,
       exitCode: code ?? 1,
       pid: null,
-      heartbeatAt: null
+      heartbeatAt: null,
+      source: "manual"
     });
   });
 
@@ -462,7 +1050,8 @@ async function startCommand(args) {
       startedAt: null,
       exitCode: 1,
       pid: null,
-      heartbeatAt: null
+      heartbeatAt: null,
+      source: "manual"
     });
   });
 
@@ -507,7 +1096,8 @@ async function serve() {
           threadOrTaskId: body.threadOrTaskId,
           exitCode: body.exitCode,
           pid: body.pid,
-          heartbeatAt: body.status === "running" ? nowIso() : body.heartbeatAt ?? null
+          heartbeatAt: body.status === "running" ? nowIso() : body.heartbeatAt ?? null,
+          source: "manual"
         });
         sendJson(res, 200, updated);
         return;
@@ -516,12 +1106,32 @@ async function serve() {
       const agentMatch = url.pathname.match(/^\/agents\/([a-z]+)$/);
       if (req.method === "POST" && agentMatch) {
         const body = await parseBody(req);
+        const normalizedStatus = body.status !== undefined ? normalizeAgentStatus(body.status) : undefined;
+        const activity = parseBooleanFlag(body.activity, false);
         const updated = await updateAgent(agentMatch[1], {
           label: body.label,
-          status: body.status,
+          status: normalizedStatus,
           detail: body.detail,
-          lastSeenAt: body.status === "active" ? nowIso() : body.lastSeenAt ?? null
+          lastSeenAt: normalizedStatus && normalizedStatus !== "offline" ? nowIso() : body.lastSeenAt ?? undefined,
+          heartbeatAt: normalizedStatus && normalizedStatus !== "offline" ? nowIso() : body.heartbeatAt ?? undefined,
+          activity,
+          blinkUntil:
+            body.blinkUntil !== undefined
+              ? body.blinkUntil
+              : activity || normalizedStatus === "attention"
+                ? futureIso(15_000)
+                : normalizedStatus === "offline"
+                  ? null
+                  : undefined
         });
+        sendJson(res, 200, updated);
+        return;
+      }
+
+      const threadMatch = url.pathname.match(/^\/threads\/([0-9a-f-]+)$/);
+      if (req.method === "POST" && threadMatch) {
+        const body = await parseBody(req);
+        const updated = await setThreadName(threadMatch[1], body.label);
         sendJson(res, 200, updated);
         return;
       }
@@ -563,7 +1173,7 @@ async function main() {
     }
     case "heartbeat": {
       const slot = normalizeSlot(args.slot);
-      console.log(JSON.stringify(await updateSlot(slot, { heartbeatAt: nowIso(), status: "running" }), null, 2));
+      console.log(JSON.stringify(await updateSlot(slot, { heartbeatAt: nowIso(), status: "running", source: "manual" }), null, 2));
       return;
     }
     case "set-status": {
@@ -576,20 +1186,68 @@ async function main() {
         threadOrTaskId: args.thread,
         exitCode: args["exit-code"],
         pid: args.pid,
-        heartbeatAt: args.status === "running" ? nowIso() : null
+        heartbeatAt: args.status === "running" ? nowIso() : null,
+        source: "manual"
       };
       console.log(JSON.stringify(await updateSlot(slot, patch), null, 2));
       return;
     }
     case "set-agent": {
       const agent = normalizeAgentName(args.agent);
+      const status = normalizeAgentStatus(String(args.status));
+      const activity = parseBooleanFlag(args.activity, false);
       const patch = {
         label: args.label,
-        status: normalizeAgentStatus(String(args.status)),
+        status,
         detail: args.detail,
-        lastSeenAt: args.status === "active" ? nowIso() : null
+        lastSeenAt: status !== "offline" ? nowIso() : null,
+        heartbeatAt: status !== "offline" ? nowIso() : null,
+        activity,
+        blinkUntil: activity || status === "attention" ? futureIso(15_000) : null
       };
       console.log(JSON.stringify(await updateAgent(agent, patch), null, 2));
+      return;
+    }
+    case "heartbeat-agent": {
+      const agent = normalizeAgentName(args.agent);
+      const status = args.status ? normalizeAgentStatus(String(args.status)) : "online";
+      const activity = parseBooleanFlag(args.activity, false);
+      console.log(
+        JSON.stringify(
+          await updateAgent(agent, {
+            status,
+            detail: args.detail,
+            lastSeenAt: nowIso(),
+            heartbeatAt: nowIso(),
+            activity,
+            blinkUntil: activity || status === "attention" ? futureIso(15_000) : null
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    case "pulse-agent": {
+      const agent = normalizeAgentName(args.agent);
+      const status = args.status ? normalizeAgentStatus(String(args.status)) : undefined;
+      console.log(
+        JSON.stringify(
+          await updateAgent(agent, {
+            status,
+            detail: args.detail,
+            lastSeenAt: status && status !== "offline" ? nowIso() : undefined,
+            heartbeatAt: status && status !== "offline" ? nowIso() : undefined,
+            blinkUntil: futureIso(15_000)
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    case "set-thread-name": {
+      console.log(JSON.stringify(await setThreadName(args.thread, args.label), null, 2));
       return;
     }
     case "start":
