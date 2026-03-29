@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
+  <rect width="144" height="144" rx="24" fill="#0f1f14"/>
+  <rect x="18" y="18" width="108" height="108" rx="20" fill="#1c3a24"/>
+  <circle cx="108" cy="36" r="10" fill="#66bb6a"/>
+  <text x="72" y="67" text-anchor="middle" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700" fill="#ffffff">CODEX</text>
+  <text x="72" y="96" text-anchor="middle" font-size="22" font-family="Segoe UI, Arial, sans-serif" fill="#c8e6c9">MONITOR</text>
+</svg>

@@ -1,0 +1,87 @@
+{
+  "Name": "Codex Monitor",
+  "Version": "0.1.0.0",
+  "Author": "OpenAI Codex",
+  "Description": "Monitors four Codex jobs via a local bridge and displays clear status colors on the Stream Deck.",
+  "Category": "Codex",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "Icon": "imgs/plugin/marketplace",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 2,
+  "UUID": "com.codex.stream-monitor",
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "Actions": [
+    {
+      "Name": "Codex Slot 1",
+      "UUID": "com.codex.stream-monitor.slot1",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the status of Codex monitor slot 1.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Codex Slot 2",
+      "UUID": "com.codex.stream-monitor.slot2",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the status of Codex monitor slot 2.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Codex Slot 3",
+      "UUID": "com.codex.stream-monitor.slot3",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the status of Codex monitor slot 3.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Codex Slot 4",
+      "UUID": "com.codex.stream-monitor.slot4",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the status of Codex monitor slot 4.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    }
+  ]
+}

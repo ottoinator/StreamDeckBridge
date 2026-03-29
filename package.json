@@ -1,0 +1,30 @@
+{
+  "name": "codex-stream-deck-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:plugin",
+    "build:plugin": ".\\node_modules\\.bin\\rollup.cmd -c streamdeck-plugin/rollup.config.mjs",
+    "bridge": "node bridge/monitor-bridge.mjs serve",
+    "bridge:init": "node bridge/monitor-bridge.mjs init",
+    "bridge:slots": "node bridge/monitor-bridge.mjs list",
+    "plugin:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-plugin.ps1",
+    "plugin:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/uninstall-plugin.ps1"
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^2.0.1"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.7.0",
+    "@rollup/plugin-commonjs": "^28.0.2",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^12.1.2",
+    "@tsconfig/node20": "^20.1.4",
+    "@types/node": "^24.0.0",
+    "rollup": "^4.32.1",
+    "tslib": "^2.8.1",
+    "typescript": "^5.8.3"
+  }
+}
