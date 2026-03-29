@@ -5,7 +5,7 @@ Lokale Windows-Integration fuer Elgato Stream Deck und Codex.
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten plus 3 Agenten-Leuchten fuer `Main`, `Noah`, `Carmen`
 
 ## Statusmodell
 
@@ -53,7 +53,25 @@ npm run plugin:install
 npm run bridge
 ```
 
-5. In der Stream-Deck-App vier Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
+5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
+   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4` sowie `Main Light`, `Noah Light`, `Carmen Light`.
+
+## Autostart ohne Shell-Fenster
+
+Bridge einmal als Hintergrunddienst-Ersatz einrichten:
+
+```powershell
+npm run service:install
+```
+
+Das nutzt auf diesem Windows-Rechner einen versteckten Autostart-Launcher im Startup-Ordner, falls der Task Scheduler keine Registrierung erlaubt.
+
+Manuell starten und stoppen:
+
+```powershell
+npm run service:start
+npm run service:stop
+```
 
 ## Slots manuell setzen
 
@@ -87,6 +105,33 @@ Slot zuruecksetzen:
 node .\bridge\monitor-bridge.mjs clear --slot 1
 ```
 
+Hinweis:
+
+- bewusst gesetzte `running`-Slots zeigen auf dem Stream Deck die Laufzeit statt einer Uhrzeit
+- zusaetzliche erkannte Codex-Prozesse koennen freie Slots automatisch als `Codex aktiv` belegen
+
+## Agenten-Leuchten
+
+`Main`, `Noah` und `Carmen` koennen als einfache Aktivitaetsleuchten genutzt werden.
+
+Main auf aktiv:
+
+```powershell
+node .\bridge\monitor-bridge.mjs set-agent --agent main --status active --detail "Arbeitet"
+```
+
+Noah auf inaktiv:
+
+```powershell
+node .\bridge\monitor-bridge.mjs set-agent --agent noah --status idle --detail "Inaktiv"
+```
+
+Carmen auf Fehler:
+
+```powershell
+node .\bridge\monitor-bridge.mjs set-agent --agent carmen --status error --detail "Stoerung"
+```
+
 ## Ueber die Bridge starten
 
 Beispiel fuer einen ueberwachten Prozess:
@@ -100,13 +145,20 @@ Der Prozess wird auf `running` gesetzt und beim Exit automatisch auf `done` oder
 ## HTTP-API
 
 - `GET http://127.0.0.1:4567/health`
+- `GET http://127.0.0.1:4567/state`
 - `GET http://127.0.0.1:4567/slots`
+- `GET http://127.0.0.1:4567/agents`
 - `POST http://127.0.0.1:4567/slots/:slot`
+- `POST http://127.0.0.1:4567/agents/:name`
 
 Beispiel:
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/slots/3 -ContentType 'application/json' -Body '{"status":"needs_input","detail":"Bitte bestaetigen","label":"Task C"}'
+```
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/agents/main -ContentType 'application/json' -Body '{"status":"active","detail":"Arbeitet","label":"Main"}'
 ```
 
 ## Persistenz

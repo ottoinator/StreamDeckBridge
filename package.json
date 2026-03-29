@@ -9,8 +9,13 @@
     "bridge": "node bridge/monitor-bridge.mjs serve",
     "bridge:init": "node bridge/monitor-bridge.mjs init",
     "bridge:slots": "node bridge/monitor-bridge.mjs list",
+    "bridge:state": "node bridge/monitor-bridge.mjs state",
     "plugin:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-plugin.ps1",
-    "plugin:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/uninstall-plugin.ps1"
+    "plugin:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/uninstall-plugin.ps1",
+    "service:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-bridge-task.ps1",
+    "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/unregister-bridge-task.ps1",
+    "service:start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-bridge-background.ps1",
+    "service:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stop-bridge.ps1"
   },
   "dependencies": {
     "@elgato/streamdeck": "^2.0.1"

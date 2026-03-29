@@ -82,6 +82,51 @@
           "TitleAlignment": "middle"
         }
       ]
+    },
+    {
+      "Name": "Main Light",
+      "UUID": "com.codex.stream-monitor.agent.main",
+      "Icon": "imgs/actions/agent",
+      "Tooltip": "Shows whether Main is active.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/agent",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Noah Light",
+      "UUID": "com.codex.stream-monitor.agent.noah",
+      "Icon": "imgs/actions/agent",
+      "Tooltip": "Shows whether Noah is active.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/agent",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Carmen Light",
+      "UUID": "com.codex.stream-monitor.agent.carmen",
+      "Icon": "imgs/actions/agent",
+      "Tooltip": "Shows whether Carmen is active.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/agent",
+          "TitleAlignment": "middle"
+        }
+      ]
     }
   ]
 }
