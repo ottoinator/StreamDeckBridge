@@ -118,6 +118,8 @@ Hinweis:
 - `online` mit `--activity true`: gruen blinkend
 - `attention`: gelb blinkend
 - `offline`: rot
+- Remote-Probes setzen standardmaessig nur noch Verfuegbarkeit. Fuer echtes "arbeitet gerade" nutze bewusst `heartbeat-agent --activity true` oder `POST /agents/:name` mit `"activity": true`.
+- Falls du das alte, aus Remote-Dateiaktivitaet abgeleitete Blinken trotzdem willst, setze `CODEX_MONITOR_REMOTE_AGENT_ACTIVITY=1`.
 
 Noah auf online:
 

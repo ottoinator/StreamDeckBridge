@@ -32,6 +32,7 @@ const THREAD_RUNNING_WINDOW_MS = 300_000;
 const SECONDARY_THREAD_RUNNING_WINDOW_MS = 90_000;
 const THREAD_DONE_WINDOW_MS = 120_000;
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
+const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const AGENT_REMOTE_DEFAULTS = {
   noah: {
     kind: "ssh-json",
@@ -53,6 +54,17 @@ const agentProbeInflight = new Map();
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function formatCodexLogDateDir(date, useUtc = false) {
+  const year = useUtc ? date.getUTCFullYear() : date.getFullYear();
+  const month = String((useUtc ? date.getUTCMonth() : date.getMonth()) + 1).padStart(2, "0");
+  const day = String(useUtc ? date.getUTCDate() : date.getDate()).padStart(2, "0");
+  return path.join(CODEX_LOG_ROOT, String(year), month, day);
+}
+
+function unique(values) {
+  return Array.from(new Set(values));
 }
 
 function toIsoDate(value) {
@@ -423,18 +435,28 @@ function chooseWorkspaceLabel(fileContent) {
 async function discoverCodexConversations() {
   try {
     const threadNames = await readThreadNames();
-    const date = new Date();
-    const dateDir = path.join(
-      CODEX_LOG_ROOT,
-      String(date.getFullYear()),
-      String(date.getMonth() + 1).padStart(2, "0"),
-      String(date.getDate()).padStart(2, "0")
+    const datesToCheck = Array.from({ length: 3 }, (_, offset) => {
+      const date = new Date();
+      date.setDate(date.getDate() - offset);
+      return date;
+    });
+    const candidateDirs = unique(
+      datesToCheck.flatMap(date => [formatCodexLogDateDir(date, false), formatCodexLogDateDir(date, true)])
     );
-    const names = await readdir(dateDir);
+    const namesByDir = await Promise.all(
+      candidateDirs.map(async dateDir => {
+        try {
+          return (await readdir(dateDir)).map(name => ({ dateDir, name }));
+        } catch {
+          return [];
+        }
+      })
+    );
     const entries = await Promise.all(
-      names
-        .filter(name => name.startsWith("codex-desktop-") && name.endsWith(".log"))
-        .map(async name => {
+      namesByDir
+        .flat()
+        .filter(({ name }) => name.startsWith("codex-desktop-") && name.endsWith(".log"))
+        .map(async ({ dateDir, name }) => {
           const fullPath = path.join(dateDir, name);
           const fileStat = await stat(fullPath);
           return { fullPath, mtimeMs: fileStat.mtimeMs };
@@ -505,7 +527,12 @@ async function discoverCodexConversations() {
         const lastActivityMs = conversation.lastActivityAt ? Date.parse(conversation.lastActivityAt) : NaN;
         const lastStopMs = conversation.lastStopAt ? Date.parse(conversation.lastStopAt) : NaN;
         const latestRunSignalMs = Number.isNaN(lastActivityMs) ? lastStartMs : Math.max(lastStartMs, lastActivityMs);
-        const latestVisibleMs = Number.isNaN(latestRunSignalMs) ? Date.parse(conversation.updatedAt) : latestRunSignalMs;
+        const hasRunSignal = !Number.isNaN(latestRunSignalMs);
+        const latestVisibleMs = hasRunSignal
+          ? latestRunSignalMs
+          : !Number.isNaN(lastStopMs)
+            ? lastStopMs
+            : NaN;
 
         if (Number.isNaN(latestVisibleMs)) {
           return null;
@@ -520,7 +547,7 @@ async function discoverCodexConversations() {
           status = "done";
           detail = "Antwort fertig";
         }
-        else if (Date.now() - latestRunSignalMs > THREAD_RUNNING_WINDOW_MS) {
+        else if (!hasRunSignal || Date.now() - latestRunSignalMs > THREAD_RUNNING_WINDOW_MS) {
           return null;
         }
         return {
@@ -866,12 +893,25 @@ async function overlayRemoteAgentStates(agents) {
   return agents.map((agent, index) => {
     const probe = results[index];
     const next = { ...agent };
+    const heartbeatAge = agent.heartbeatAt ? Date.now() - Date.parse(agent.heartbeatAt) : Number.POSITIVE_INFINITY;
+    const hasRecentExplicitSignal =
+      Number.isFinite(heartbeatAge) &&
+      heartbeatAge <= AGENT_HEARTBEAT_TIMEOUT_MS &&
+      (agent.activity || agent.status === "attention");
     const previous = agentProbeCache.get(agent.name)?.previousResult;
     const changedActivityMetric =
+      ENABLE_REMOTE_AGENT_ACTIVITY &&
       probe.activityMetric !== undefined &&
       previous?.activityMetric !== undefined &&
       probe.activityMetric !== previous.activityMetric;
-    const shouldBlink = Boolean(probe.recentActivity || changedActivityMetric);
+    const shouldBlink =
+      ENABLE_REMOTE_AGENT_ACTIVITY &&
+      Boolean(probe.recentActivity || changedActivityMetric);
+
+    if (hasRecentExplicitSignal) {
+      next.updatedAt = probe.checkedAt;
+      return next;
+    }
 
     if (probe.status === "offline") {
       next.status = "offline";
