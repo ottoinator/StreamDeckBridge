@@ -20,11 +20,13 @@ const AGENT_ORDER = ["noah", "carmen"];
 const execFileAsync = promisify(execFile);
 const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const AGENT_PROBE_TTL_MS = 15_000;
+const NOAH_MONITOR_TTL_MS = 15_000;
 const THREAD_HEARTBEAT_TIMEOUT_MS = Number(process.env.CODEX_MONITOR_THREAD_HEARTBEAT_TIMEOUT_MS || 180_000);
 const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS || 900_000);
 const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_INPUT_TTL_MS || 86_400_000);
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
+const NOAH_TILE_ORDER = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
 const AGENT_REMOTE_DEFAULTS = {
   noah: {
     kind: "ssh-json",
@@ -43,6 +45,165 @@ const AGENT_REMOTE_DEFAULTS = {
 };
 const agentProbeCache = new Map();
 const agentProbeInflight = new Map();
+const noahMonitorCache = {
+  cachedAt: 0,
+  result: null
+};
+let noahMonitorInflight = null;
+const NOAH_MONITOR_DEFAULTS = {
+  host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || AGENT_REMOTE_DEFAULTS.noah.host,
+  command:
+    process.env.CODEX_MONITOR_NOAH_MONITOR_COMMAND ||
+    String.raw`python3 - <<'PY'
+from __future__ import annotations
+import json
+import subprocess
+import urllib.request
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+BASE_DIR = Path('/root/.openclaw/workspace/.pi')
+REGISTRY_PATH = BASE_DIR / 'artifacts' / 'xetra_behavior_smoke_registry.json'
+
+
+def parse_iso(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def iso_or_none(value):
+    return value.isoformat() if value else None
+
+
+def read_json(path):
+    if not path or not Path(path).exists():
+        return None
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def service_token():
+    try:
+        service = subprocess.check_output(['systemctl', 'cat', 'noah_companion_api.service'], text=True)
+    except Exception:
+        return None
+    prefix = 'Environment=NOAH_COMPANION_API_TOKEN='
+    for line in service.splitlines():
+        if line.startswith(prefix):
+            return line.split('=', 2)[2].strip()
+    return None
+
+
+def fetch_json(path, token):
+    headers = {'Accept': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    request = urllib.request.Request('http://127.0.0.1:8765' + path, headers=headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+
+
+def next_us_open_berlin(now_utc):
+    tz_et = ZoneInfo('America/New_York')
+    tz_berlin = ZoneInfo('Europe/Berlin')
+    now_et = now_utc.astimezone(tz_et)
+    candidate_date = now_et.date()
+    while True:
+        candidate = datetime.combine(candidate_date, time(9, 30), tzinfo=tz_et)
+        if candidate.weekday() >= 5 or candidate <= now_et:
+            candidate_date += timedelta(days=1)
+            continue
+        return candidate.astimezone(tz_berlin)
+
+
+def xetra_summary():
+    registry = read_json(REGISTRY_PATH) or {}
+    active = registry.get('active_run') or {}
+    scheduled = registry.get('scheduled_run') or {}
+    last_run = registry.get('last_run') or {}
+    status_payload = None
+    for candidate in (active, scheduled, last_run):
+        status_payload = read_json(candidate.get('status_path'))
+        if status_payload:
+            break
+    if not status_payload:
+        entry = (registry.get('runs_by_trade_day') or {}).get((active or scheduled or last_run or {}).get('trade_day') or '')
+        status_payload = ((entry or {}).get('status')) or None
+    interval_sec = active.get('interval_sec') or scheduled.get('interval_sec') or 300
+    latest_cycle = parse_iso((status_payload or {}).get('latest_cycle_ts_et'))
+    next_cycle = latest_cycle + timedelta(seconds=int(interval_sec)) if latest_cycle else None
+    scheduled_start = parse_iso(active.get('scheduled_start_berlin') or scheduled.get('scheduled_start_berlin') or (status_payload or {}).get('scheduled_start_berlin'))
+    state = (status_payload or {}).get('state') or active.get('state') or scheduled.get('state') or last_run.get('state') or 'not_started'
+    return {
+        'state': state,
+        'trade_day': (status_payload or {}).get('trade_day') or active.get('trade_day') or scheduled.get('trade_day') or last_run.get('trade_day'),
+        'cycle_count': int((status_payload or {}).get('cycle_count') or 0),
+        'roundtrip_count': int((status_payload or {}).get('roundtrip_count') or 0),
+        'latest_cycle_at': iso_or_none(latest_cycle),
+        'next_cycle_at': iso_or_none(next_cycle),
+        'scheduled_start_at': iso_or_none(scheduled_start),
+        'session_window': (status_payload or {}).get('session_window'),
+        'interval_sec': int(interval_sec),
+        'source': 'registry',
+    }
+
+
+def main():
+    token = service_token()
+    now_utc = datetime.now(timezone.utc)
+    status = fetch_json('/api/v1/status/current', token)
+    intraday = fetch_json('/api/v1/intraday/today', token)
+    cycles = fetch_json('/api/v1/observer/cycles?limit=3', token)
+
+    cycle_items = cycles.get('cycles') or []
+    last_cycle = parse_iso(((status.get('system_health') or {}).get('last_successful_cycle_ts_et'))) or parse_iso((cycle_items[-1] if cycle_items else {}).get('ts_et'))
+    previous_cycle = parse_iso((cycle_items[-2] if len(cycle_items) >= 2 else {}).get('ts_et'))
+    interval_sec = int((last_cycle - previous_cycle).total_seconds()) if last_cycle and previous_cycle else 600
+    if interval_sec <= 0:
+        interval_sec = 600
+    next_cycle = last_cycle + timedelta(seconds=interval_sec) if last_cycle else None
+    session_state = ((status.get('trading_posture') or {}).get('session_state') or {})
+    policy_metrics = intraday.get('current_policy_metrics') or {}
+    entries_today = 0
+    for metrics in policy_metrics.values():
+        try:
+            entries_today += int(metrics.get('entries_today') or 0)
+        except Exception:
+            pass
+    roundtrips = len(((intraday.get('decision_trail_summary') or {}).get('roundtrips') or []))
+
+    payload = {
+        'checked_at': datetime.now(timezone.utc).isoformat(),
+        'us': {
+            'trade_day': intraday.get('trade_day'),
+            'market_open': bool(intraday.get('market_open')),
+            'session_state': session_state.get('code'),
+            'session_subtitle': session_state.get('subtitle'),
+            'headline': (status.get('human_status') or {}).get('headline'),
+            'health': ((status.get('system_health') or {}).get('status') or {}).get('code'),
+            'last_cycle_at': iso_or_none(last_cycle),
+            'next_cycle_at': iso_or_none(next_cycle),
+            'cycle_interval_sec': interval_sec,
+            'roundtrip_count': roundtrips,
+            'entries_today': entries_today,
+            'trade_ideas_count': int(intraday.get('trade_ideas_count') or 0),
+            'next_market_open_berlin': iso_or_none(next_us_open_berlin(now_utc)),
+        },
+        'xetra': xetra_summary(),
+    }
+    print(json.dumps(payload))
+
+
+main()
+PY`
+};
 
 function nowIso() {
   return new Date().toISOString();
@@ -727,12 +888,12 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function runSshJson(host, command) {
+async function runSshJson(host, command, timeout = 8_000) {
   const { stdout } = await execFileAsync(
     "ssh",
     [host, command],
     {
-      timeout: 8_000,
+      timeout,
       windowsHide: true,
       maxBuffer: 1024 * 1024
     }
@@ -922,6 +1083,228 @@ async function overlayRemoteAgentStates(agents) {
     next.blinkUntil = shouldBlink ? futureIso(20_000) : null;
     return next;
   });
+}
+
+function formatBerlinTime(value) {
+  if (!value) {
+    return "--:--";
+  }
+  const parsed = Date.parse(String(value));
+  if (Number.isNaN(parsed)) {
+    return "--:--";
+  }
+  return new Intl.DateTimeFormat("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Europe/Berlin"
+  }).format(new Date(parsed));
+}
+
+function formatCountdown(target) {
+  if (!target) {
+    return "--:--";
+  }
+  const parsed = Date.parse(String(target));
+  if (Number.isNaN(parsed)) {
+    return "--:--";
+  }
+  const diffSeconds = Math.max(0, Math.floor((parsed - Date.now()) / 1000));
+  const hours = Math.floor(diffSeconds / 3600);
+  const minutes = Math.floor((diffSeconds % 3600) / 60);
+  const seconds = diffSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function titleCaseValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatUsSessionLabel(value, marketOpen) {
+  if (marketOpen) {
+    return "Laeuft";
+  }
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "OPEN_DISCOVERY") {
+    return "Vorstart";
+  }
+  if (normalized === "TRADEABLE") {
+    return "Handel";
+  }
+  if (normalized === "DEFENSIVE") {
+    return "Defensiv";
+  }
+  if (normalized === "NO_TRADE_LOCK") {
+    return "Gesperrt";
+  }
+  if (normalized === "CLOSE_ONLY") {
+    return "Nur Exit";
+  }
+  return titleCaseValue(value || "wartet");
+}
+
+function createDefaultNoahTile(key) {
+  const labels = {
+    xetra_status: "Xetra Smoke",
+    xetra_cycle: "Xetra Zyklus",
+    us_status: "US Handel",
+    us_cycle: "US Zyklus"
+  };
+  return {
+    key,
+    label: labels[key] || "Noah",
+    status: "idle",
+    line1: "Keine Daten",
+    line2: "Warte auf Probe",
+    footer: "--:--",
+    updatedAt: nowIso()
+  };
+}
+
+function makeNoahProbeFallback(message) {
+  return {
+    checked_at: nowIso(),
+    error: String(message || "Noah Monitor nicht verfuegbar"),
+    us: null,
+    xetra: null
+  };
+}
+
+async function probeNoahMonitor() {
+  try {
+    return await runSshJson(NOAH_MONITOR_DEFAULTS.host, NOAH_MONITOR_DEFAULTS.command, 20_000);
+  } catch (error) {
+    return makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function getCachedNoahMonitor() {
+  if (noahMonitorCache.result && Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS) {
+    return noahMonitorCache.result;
+  }
+
+  if (noahMonitorInflight) {
+    return noahMonitorInflight;
+  }
+
+  noahMonitorInflight = probeNoahMonitor()
+    .then(result => {
+      noahMonitorCache.cachedAt = Date.now();
+      noahMonitorCache.result = result;
+      noahMonitorInflight = null;
+      return result;
+    })
+    .catch(error => {
+      const fallback = makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
+      noahMonitorCache.cachedAt = Date.now();
+      noahMonitorCache.result = fallback;
+      noahMonitorInflight = null;
+      return fallback;
+    });
+
+  return noahMonitorInflight;
+}
+
+function buildNoahTiles(summary) {
+  const updatedAt = summary?.checked_at || nowIso();
+  if (summary?.error) {
+    return NOAH_TILE_ORDER.map(key => ({
+      ...createDefaultNoahTile(key),
+      status: "error",
+      line1: "Probe Fehler",
+      line2: String(summary.error),
+      updatedAt
+    }));
+  }
+
+  const xetra = summary?.xetra || {};
+  const us = summary?.us || {};
+  const xetraState = String(xetra.state || "not_started").toLowerCase();
+  const xetraStatus =
+    xetraState === "running"
+      ? "ok"
+      : ["planned", "starting", "stopping"].includes(xetraState)
+        ? "warn"
+        : ["failed", "error"].includes(xetraState)
+          ? "error"
+          : "idle";
+  const usSession = String(us.session_state || "offline").toUpperCase();
+  const usStatus =
+    us.market_open || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession)
+      ? "ok"
+      : us.health === "INTERVENTION_REQUIRED"
+        ? "error"
+        : "warn";
+
+  const xetraFooter =
+    xetraState === "running"
+      ? formatCountdown(xetra.next_cycle_at)
+      : xetra.scheduled_start_at
+        ? formatCountdown(xetra.scheduled_start_at)
+        : xetra.session_window || "--:--";
+
+  const usFooter =
+    us.market_open || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession)
+      ? formatCountdown(us.next_cycle_at)
+      : formatCountdown(us.next_market_open_berlin);
+
+  const tiles = {
+    xetra_status: {
+      key: "xetra_status",
+      label: "Xetra Smoke",
+      status: xetraStatus,
+      line1:
+        xetraState === "running"
+          ? "Laeuft"
+          : xetraState === "not_started"
+            ? "Nicht aktiv"
+            : titleCaseValue(xetra.state || "unbekannt"),
+      line2: `Trades ${Number(xetra.roundtrip_count || 0)}`,
+      footer: xetraFooter,
+      updatedAt
+    },
+    xetra_cycle: {
+      key: "xetra_cycle",
+      label: "Xetra Zyklus",
+      status: xetraStatus,
+      line1: `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`,
+      line2: `C${Number(xetra.cycle_count || 0)} T${Number(xetra.roundtrip_count || 0)}`,
+      footer: xetraFooter,
+      updatedAt
+    },
+    us_status: {
+      key: "us_status",
+      label: "US Handel",
+      status: usStatus,
+      line1: formatUsSessionLabel(us.session_state, Boolean(us.market_open)),
+      line2: us.market_open ? `Trades ${Number(us.roundtrip_count || 0)}` : `Start ${formatBerlinTime(us.next_market_open_berlin)}`,
+      footer: usFooter,
+      updatedAt
+    },
+    us_cycle: {
+      key: "us_cycle",
+      label: "US Zyklus",
+      status: usStatus,
+      line1: `Letz ${formatBerlinTime(us.last_cycle_at)}`,
+      line2: `T${Number(us.roundtrip_count || 0)} I${Number(us.trade_ideas_count || 0)}`,
+      footer: formatCountdown(us.next_cycle_at),
+      updatedAt
+    }
+  };
+
+  return NOAH_TILE_ORDER.map(key => ({
+    ...createDefaultNoahTile(key),
+    ...(tiles[key] || {})
+  }));
 }
 
 async function updateSlot(slotNumber, patch) {
@@ -1174,7 +1557,12 @@ async function serve() {
       }
 
       if (req.method === "GET" && url.pathname === "/state") {
-        sendJson(res, 200, { slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents(), threads: await loadExplicitThreads() });
+        sendJson(res, 200, {
+          slots: await loadEffectiveSlots(),
+          agents: await loadEffectiveAgents(),
+          threads: await loadExplicitThreads(),
+          noahTiles: buildNoahTiles(await getCachedNoahMonitor())
+        });
         return;
       }
 
@@ -1310,7 +1698,18 @@ async function main() {
       console.log(JSON.stringify(await loadExplicitThreads(), null, 2));
       return;
     case "state":
-      console.log(JSON.stringify({ slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents(), threads: await loadExplicitThreads() }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            slots: await loadEffectiveSlots(),
+            agents: await loadEffectiveAgents(),
+            threads: await loadExplicitThreads(),
+            noahTiles: buildNoahTiles(await getCachedNoahMonitor())
+          },
+          null,
+          2
+        )
+      );
       return;
     case "clear": {
       const slot = normalizeSlot(args.slot);

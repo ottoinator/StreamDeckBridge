@@ -5,7 +5,7 @@ Lokale Windows-Integration fuer Elgato Stream Deck und Codex.
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten plus 2 Agenten-Leuchten fuer `Noah` und `Carmen`
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 4 Noah-Monitor-Kacheln fuer Xetra- und US-Betrieb
 
 Fuer Codex-Chats gibt es jetzt zusaetzlich einen expliziten Meldeweg:
 
@@ -104,7 +104,7 @@ npm run bridge
 ```
 
 5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
-   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4` sowie `Noah Light`, `Carmen Light`.
+   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4`, `Noah Light`, `Carmen Light`, `Noah Xetra Status`, `Noah Xetra Cycle`, `Noah US Status` und `Noah US Cycle`.
 
 ## Autostart ohne Shell-Fenster
 
@@ -194,6 +194,17 @@ Agent auf offline:
 ```powershell
 node .\bridge\monitor-bridge.mjs set-agent --agent noah --status offline --detail "Nicht verfuegbar"
 ```
+
+## Noah-Monitor-Kacheln
+
+Die vier Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
+
+- `Noah Xetra Status`: zeigt, ob der Xetra-Smoke laeuft und ob bereits Trades entstanden sind
+- `Noah Xetra Cycle`: zeigt letzten Xetra-Zyklus, Cycle-Zaehler und Countdown bis zum naechsten Xetra-Zyklus
+- `Noah US Status`: zeigt, ob Noah im US-Handel ist oder wie lange es noch bis zum Start dauert
+- `Noah US Cycle`: zeigt letzten US-Zyklus, Trade-Counter und Countdown bis zum naechsten US-Zyklus
+
+Die Bridge zieht dafuer Noah-Daten ueber den vorhandenen `ocvps`-SSH-Zugang. Fuer Xetra wird auf die Runtime-Registry zurueckgefallen, falls der deployte Companion-API-Prozess den Xetra-Endpunkt noch nicht ausliefert.
 
 ## Ueber die Bridge starten
 

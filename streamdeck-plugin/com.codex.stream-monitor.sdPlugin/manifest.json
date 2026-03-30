@@ -112,6 +112,66 @@
           "TitleAlignment": "middle"
         }
       ]
+    },
+    {
+      "Name": "Noah Xetra Status",
+      "UUID": "com.codex.stream-monitor.noah.xetra-status",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows whether the Xetra smoke test is running and whether trades happened.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Noah Xetra Cycle",
+      "UUID": "com.codex.stream-monitor.noah.xetra-cycle",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the latest Xetra smoke cycle, countdown and trade count.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Noah US Status",
+      "UUID": "com.codex.stream-monitor.noah.us-status",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows whether Noah is in the US trading session or counting down to it.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Noah US Cycle",
+      "UUID": "com.codex.stream-monitor.noah.us-cycle",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows the latest US cycle, countdown and trade counter.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
     }
   ]
 }

@@ -1,5 +1,7 @@
 export type SlotStatus = "idle" | "running" | "needs_input" | "error" | "done";
 export type AgentStatus = "online" | "attention" | "offline";
+export type NoahTileStatus = "idle" | "ok" | "warn" | "error";
+export type NoahTileKey = "xetra_status" | "xetra_cycle" | "us_status" | "us_cycle";
 
 export type SlotState = {
   slot: number;
@@ -27,9 +29,20 @@ export type AgentState = {
   blinkUntil?: string | null;
 };
 
+export type NoahTileState = {
+  key: NoahTileKey;
+  label: string;
+  status: NoahTileStatus;
+  line1: string;
+  line2: string;
+  footer: string;
+  updatedAt: string;
+};
+
 export type MonitorState = {
   slots: SlotState[];
   agents: AgentState[];
+  noahTiles: NoahTileState[];
 };
 
 export const BRIDGE_URL = process.env.CODEX_MONITOR_URL || "http://127.0.0.1:4567/state";
@@ -47,6 +60,14 @@ const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dim
   online: { title: "ONLINE", color: "#14532d", dimColor: "#0b2e1a", dot: "#86efac", dimDot: "#1f6b3a" },
   attention: { title: "ACHTUNG", color: "#a16207", dimColor: "#6c4305", dot: "#fde047", dimDot: "#8a6708" },
   offline: { title: "OFFLINE", color: "#7f1d1d", dimColor: "#4d1010", dot: "#fca5a5", dimDot: "#5f1414" }
+};
+
+const NOAH_TILE_ORDER: NoahTileKey[] = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
+const NOAH_TILE_META: Record<NoahTileStatus, { title: string; color: string; dot: string }> = {
+  idle: { title: "BEREIT", color: "#4b5563", dot: "#cbd5e1" },
+  ok: { title: "OK", color: "#166534", dot: "#86efac" },
+  warn: { title: "WARTET", color: "#9a6700", dot: "#fde68a" },
+  error: { title: "FEHLER", color: "#991b1b", dot: "#fca5a5" }
 };
 
 export function defaultSlot(slot: number): SlotState {
@@ -76,6 +97,24 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
   };
 }
 
+export function defaultNoahTile(key: NoahTileKey): NoahTileState {
+  const labels: Record<NoahTileKey, string> = {
+    xetra_status: "Xetra Smoke",
+    xetra_cycle: "Xetra Zyklus",
+    us_status: "US Handel",
+    us_cycle: "US Zyklus"
+  };
+  return {
+    key,
+    label: labels[key],
+    status: "idle",
+    line1: "Keine Daten",
+    line2: "Warte auf Bridge",
+    footer: "--:--",
+    updatedAt: new Date(0).toISOString()
+  };
+}
+
 export function offlineState(): MonitorState {
   return {
     slots: Array.from({ length: 4 }, (_, index) => ({
@@ -87,6 +126,12 @@ export function offlineState(): MonitorState {
       ...defaultAgent(name as AgentState["name"]),
       status: "offline",
       detail: "Bridge offline"
+    })),
+    noahTiles: NOAH_TILE_ORDER.map(key => ({
+      ...defaultNoahTile(key),
+      status: "error",
+      line1: "Bridge",
+      line2: "offline"
     }))
   };
 }
@@ -108,7 +153,8 @@ function normalizeAgentStatus(status: unknown): AgentStatus {
 export function normalizeState(payload: unknown): MonitorState {
   const fallback = {
     slots: Array.from({ length: 4 }, (_, index) => defaultSlot(index + 1)),
-    agents: ["noah", "carmen"].map(name => defaultAgent(name as AgentState["name"]))
+    agents: ["noah", "carmen"].map(name => defaultAgent(name as AgentState["name"])),
+    noahTiles: NOAH_TILE_ORDER.map(key => defaultNoahTile(key))
   };
 
   if (!payload || typeof payload !== "object") {
@@ -118,6 +164,7 @@ export function normalizeState(payload: unknown): MonitorState {
   const source = payload as Partial<MonitorState>;
   const slots = Array.isArray(source.slots) ? source.slots : [];
   const agents = Array.isArray(source.agents) ? source.agents : [];
+  const noahTiles = Array.isArray(source.noahTiles) ? source.noahTiles : [];
 
   return {
     slots: fallback.slots.map((item, index) => {
@@ -155,6 +202,23 @@ export function normalizeState(payload: unknown): MonitorState {
         heartbeatAt: typeof agent.heartbeatAt === "string" ? agent.heartbeatAt : item.heartbeatAt,
         activity: Boolean(agent.activity),
         blinkUntil: typeof agent.blinkUntil === "string" ? agent.blinkUntil : item.blinkUntil
+      };
+    }),
+    noahTiles: fallback.noahTiles.map((item, index) => {
+      const candidate = noahTiles[index];
+      if (!candidate || typeof candidate !== "object") {
+        return item;
+      }
+      const tile = candidate as Partial<NoahTileState>;
+      return {
+        ...item,
+        ...tile,
+        key: item.key,
+        label: String(tile.label || item.label),
+        line1: String(tile.line1 || item.line1),
+        line2: String(tile.line2 || item.line2),
+        footer: String(tile.footer || item.footer),
+        status: (["idle", "ok", "warn", "error"].includes(String(tile.status)) ? tile.status : item.status) as NoahTileStatus
       };
     })
   };
@@ -286,6 +350,31 @@ export function agentSvg(agent: AgentState): string {
       <circle cx="36" cy="28" r="16" fill="rgba(255,255,255,${haloOpacity})" />
       <circle cx="36" cy="28" r="${lampRadius}" fill="${lampColor}" />
       <text x="36" y="66" text-anchor="middle" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(footer)}</text>
+      ${titleSvg}
+      ${detailSvg}
+    </svg>
+  `)}`;
+}
+
+export function noahTileSvg(tile: NoahTileState): string {
+  const meta = NOAH_TILE_META[tile.status];
+  const titleLines = wrapText(tile.label, 10, 2);
+  const line1 = wrapText(tile.line1 || meta.title, 12, 1);
+  const line2 = wrapText(tile.line2 || "", 12, 2);
+
+  const titleSvg = titleLines
+    .map((line, index) => `<text x="8" y="${14 + index * 10}" font-size="9" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
+    .join("");
+  const detailSvg = [...line1, ...line2]
+    .map((line, index) => `<text x="8" y="${38 + index * 9}" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
+    .join("");
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
+      <rect width="72" height="72" rx="12" fill="${meta.color}" />
+      <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.07)" />
+      <circle cx="58" cy="14" r="6" fill="${meta.dot}" />
+      <text x="8" y="63" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(tile.footer || meta.title)}</text>
       ${titleSvg}
       ${detailSvg}
     </svg>
