@@ -144,6 +144,14 @@ function Invoke-BridgePost {
     return Invoke-RestMethod -Method Post -Uri $Uri -ContentType "application/json" -Body $json
 }
 
+function ConvertTo-SingleQuotedPowerShellLiteral {
+    param([string]$Value)
+    if ($null -eq $Value) {
+        return "''"
+    }
+    return "'$($Value.Replace("'", "''"))'"
+}
+
 function Start-Watcher {
     param(
         [string]$CurrentThreadId,
@@ -159,17 +167,23 @@ function Start-Watcher {
     }
 
     Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $PSCommandPath,
-        "-Action", "watch-loop",
-        "-ThreadId", $CurrentThreadId,
-        "-BridgeUrl", $CurrentBridgeUrl,
-        "-IntervalSeconds", $CurrentIntervalSeconds
-    )
-    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds -WatcherPid $process.Id
+    $watchCommand = @(
+        "& $(ConvertTo-SingleQuotedPowerShellLiteral -Value $PSCommandPath)",
+        "-Action watch-loop",
+        "-ThreadId $(ConvertTo-SingleQuotedPowerShellLiteral -Value $CurrentThreadId)",
+        "-BridgeUrl $(ConvertTo-SingleQuotedPowerShellLiteral -Value $CurrentBridgeUrl)",
+        "-IntervalSeconds $CurrentIntervalSeconds"
+    ) -join " "
+    $encodedWatchCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchCommand))
+    $commandLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encodedWatchCommand"
+    $createResult = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $commandLine
+        CurrentDirectory = (Get-Location).Path
+    }
+    if ($createResult.ReturnValue -ne 0 -or -not $createResult.ProcessId) {
+        throw "Watcher konnte nicht gestartet werden (Win32_Process.Create ReturnValue=$($createResult.ReturnValue))."
+    }
+    Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds -WatcherPid ([int]$createResult.ProcessId)
     return Read-WatcherState -CurrentThreadId $CurrentThreadId
 }
 
