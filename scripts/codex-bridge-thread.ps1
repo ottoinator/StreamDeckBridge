@@ -9,7 +9,7 @@ param(
     [int]$Slot = 0,
     [int]$ExitCode = 1,
     [int]$IntervalSeconds = 20,
-    [int]$IdleDoneSeconds = $(if ($env:CODEX_MONITOR_THREAD_IDLE_DONE_SECONDS) { [int]$env:CODEX_MONITOR_THREAD_IDLE_DONE_SECONDS } else { 90 }),
+    [int]$IdleDoneSeconds = $(if ($env:CODEX_MONITOR_THREAD_IDLE_DONE_SECONDS) { [int]$env:CODEX_MONITOR_THREAD_IDLE_DONE_SECONDS } else { 0 }),
     [switch]$Watch
 )
 
@@ -52,6 +52,29 @@ function Get-WatcherStatePath {
     return Join-Path (Get-WatcherDirectory) "$CurrentThreadId.json"
 }
 
+function Invoke-WithRetry {
+    param(
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 5,
+        [int]$DelayMilliseconds = 75
+    )
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return & $ScriptBlock
+        } catch {
+            $lastError = $_
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds ($DelayMilliseconds * $attempt)
+        }
+    }
+    if ($null -ne $lastError) {
+        throw $lastError
+    }
+}
+
 function Read-WatcherState {
     param([string]$CurrentThreadId)
     $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
@@ -59,7 +82,7 @@ function Read-WatcherState {
         return $null
     }
     try {
-        return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        return Invoke-WithRetry -ScriptBlock { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
     } catch {
         return $null
     }
@@ -86,20 +109,29 @@ function Write-WatcherState {
         detail = $CurrentDetail
         slot = $(if ($CurrentSlot -gt 0) { $CurrentSlot } else { $null })
         intervalSeconds = $CurrentIntervalSeconds
-        idleDoneSeconds = $(if ($CurrentIdleDoneSeconds -gt 0) { $CurrentIdleDoneSeconds } else { 90 })
+        idleDoneSeconds = $(if ($CurrentIdleDoneSeconds -gt 0) { $CurrentIdleDoneSeconds } else { 0 })
         lastActivityAt = $(if ([string]::IsNullOrWhiteSpace($LastActivityAt)) { Get-NowIso } else { $LastActivityAt })
         pid = $(if ($WatcherPid -gt 0) { $WatcherPid } else { $null })
         updatedAt = Get-NowIso
     }
     $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
-    ($state | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8
+    $tempPath = "$path.tmp"
+    $json = $state | ConvertTo-Json -Depth 5
+    Invoke-WithRetry -ScriptBlock {
+        Set-Content -LiteralPath $tempPath -Value $json -Encoding UTF8
+        Move-Item -LiteralPath $tempPath -Destination $path -Force
+    } | Out-Null
 }
 
 function Remove-WatcherState {
     param([string]$CurrentThreadId)
     $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
     if (Test-Path -LiteralPath $path) {
-        Remove-Item -LiteralPath $path -Force
+        Invoke-WithRetry -ScriptBlock {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        } | Out-Null
     }
 }
 
@@ -121,7 +153,7 @@ function Update-WatcherMetadata {
     $detailToWrite = if ([string]::IsNullOrWhiteSpace($CurrentDetail)) { [string]$existing.detail } else { $CurrentDetail }
     $existingSlot = if ($null -ne $existing.slot) { [int]$existing.slot } else { 0 }
     $existingInterval = if ($null -ne $existing.intervalSeconds) { [int]$existing.intervalSeconds } else { 20 }
-    $existingIdleDone = if ($null -ne $existing.idleDoneSeconds) { [int]$existing.idleDoneSeconds } else { 90 }
+    $existingIdleDone = if ($null -ne $existing.idleDoneSeconds) { [int]$existing.idleDoneSeconds } else { 0 }
     $existingLastActivityAt = if ($null -ne $existing.lastActivityAt) { [string]$existing.lastActivityAt } else { Get-NowIso }
     $existingPid = if ($null -ne $existing.pid) { [int]$existing.pid } else { 0 }
     $slotToWrite = if ($CurrentSlot -gt 0) { $CurrentSlot } else { $existingSlot }
@@ -360,9 +392,11 @@ $targetUri = if ($useHeartbeatEndpoint) { "$threadUri/heartbeat" } else { $threa
 $response = Invoke-BridgePost -Uri $targetUri -Body $payload
 
 if ($Action -in @("register", "progress", "heartbeat")) {
-    Update-WatcherMetadata -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $(if ($payload.detail) { [string]$payload.detail } else { "Codex arbeitet" }) -CurrentSlot $Slot -CurrentIntervalSeconds $IntervalSeconds -CurrentIdleDoneSeconds $IdleDoneSeconds -RefreshActivity
+    $resolvedSlot = if ($null -ne $response.slot -and [int]$response.slot -gt 0) { [int]$response.slot } else { $Slot }
+    $resolvedDetail = if ($payload.detail) { [string]$payload.detail } elseif ($null -ne $response.detail -and -not [string]::IsNullOrWhiteSpace([string]$response.detail)) { [string]$response.detail } else { "Codex arbeitet" }
+    Update-WatcherMetadata -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $resolvedDetail -CurrentSlot $resolvedSlot -CurrentIntervalSeconds $IntervalSeconds -CurrentIdleDoneSeconds $IdleDoneSeconds -RefreshActivity
     if ($Watch -or -not (Test-WatcherRunning -CurrentThreadId $resolvedThreadId)) {
-        Start-Watcher -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $(if ($payload.detail) { [string]$payload.detail } else { "Codex arbeitet" }) -CurrentBridgeUrl $BridgeUrl -CurrentSlot $Slot -CurrentIntervalSeconds $IntervalSeconds -CurrentIdleDoneSeconds $IdleDoneSeconds | Out-Null
+        Start-Watcher -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $resolvedDetail -CurrentBridgeUrl $BridgeUrl -CurrentSlot $resolvedSlot -CurrentIntervalSeconds $IntervalSeconds -CurrentIdleDoneSeconds $IdleDoneSeconds | Out-Null
     }
 }
 

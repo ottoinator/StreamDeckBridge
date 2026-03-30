@@ -40,6 +40,7 @@ Die Bridge arbeitet jetzt explizit thread-basiert:
 - Heartbeats halten den Slot sauber auf `running`
 - `needs_input`, `done` und `error` kommen direkt vom Chat statt aus Log-Raten
 - Chat-Slots entstehen nur noch aus expliziter Registrierung, nicht mehr aus Codex-Logs
+- automatisches Idle-`done` ist optional und nur aktiv, wenn `CODEX_MONITOR_THREAD_IDLE_DONE_SECONDS` gesetzt ist
 
 Chat registrieren und Heartbeat-Loop starten:
 
