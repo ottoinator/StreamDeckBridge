@@ -39,7 +39,7 @@ Die Bridge arbeitet jetzt explizit thread-basiert:
 - aktive Codex-Chats registrieren sich selbst ueber `CODEX_THREAD_ID`
 - Heartbeats halten den Slot sauber auf `running`
 - `needs_input`, `done` und `error` kommen direkt vom Chat statt aus Log-Raten
-- die alte Codex-Log-Erkennung bleibt nur noch Fallback, wenn keine expliziten Threads gemeldet sind
+- Chat-Slots entstehen nur noch aus expliziter Registrierung, nicht mehr aus Codex-Logs
 
 Chat registrieren und Heartbeat-Loop starten:
 

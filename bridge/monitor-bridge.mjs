@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
@@ -12,15 +12,6 @@ const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
 const THREADS_FILE = path.join(DATA_DIR, "threads.json");
-const CODEX_LOG_ROOT = path.join(
-  process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
-  "Packages",
-  "OpenAI.Codex_2p2nqsd0c76g0",
-  "LocalCache",
-  "Local",
-  "Codex",
-  "Logs"
-);
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const ENABLE_PROCESS_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_PROCESSES === "1";
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
@@ -32,10 +23,7 @@ const AGENT_PROBE_TTL_MS = 15_000;
 const THREAD_HEARTBEAT_TIMEOUT_MS = Number(process.env.CODEX_MONITOR_THREAD_HEARTBEAT_TIMEOUT_MS || 180_000);
 const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS || 900_000);
 const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_INPUT_TTL_MS || 86_400_000);
-const THREAD_RUNNING_WINDOW_MS = 300_000;
-const THREAD_DONE_WINDOW_MS = 120_000;
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
-const ENABLE_CODEX_LOG_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_CODEX !== "0";
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const AGENT_REMOTE_DEFAULTS = {
   noah: {
@@ -58,17 +46,6 @@ const agentProbeInflight = new Map();
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function formatCodexLogDateDir(date, useUtc = false) {
-  const year = useUtc ? date.getUTCFullYear() : date.getFullYear();
-  const month = String((useUtc ? date.getUTCMonth() : date.getMonth()) + 1).padStart(2, "0");
-  const day = String(useUtc ? date.getUTCDate() : date.getDate()).padStart(2, "0");
-  return path.join(CODEX_LOG_ROOT, String(year), month, day);
-}
-
-function unique(values) {
-  return Array.from(new Set(values));
 }
 
 function toIsoDate(value) {
@@ -661,234 +638,15 @@ function overlayDiscoveredProcesses(slots, processes) {
   });
 }
 
-function chooseWorkspaceLabel(fileContent) {
-  const matches = Array.from(fileContent.matchAll(/cwd="([^"]+)"/g)).map(match => String(match[1] || ""));
-  if (!matches.length) {
-    return "";
-  }
-
-  const counts = new Map();
-  for (const rawPath of matches) {
-    const normalized = rawPath.replace(/[\\/]\.git$/i, "").replaceAll("/", path.sep);
-    const basename = path.basename(normalized);
-    if (!basename) {
-      continue;
-    }
-    counts.set(basename, (counts.get(basename) || 0) + 1);
-  }
-
-  return Array.from(counts.entries()).sort((left, right) => right[1] - left[1])[0]?.[0] || "";
-}
-
-async function discoverCodexConversations() {
-  try {
-    const threadNames = await readThreadNames();
-    const datesToCheck = Array.from({ length: 3 }, (_, offset) => {
-      const date = new Date();
-      date.setDate(date.getDate() - offset);
-      return date;
-    });
-    const candidateDirs = unique(
-      datesToCheck.flatMap(date => [formatCodexLogDateDir(date, false), formatCodexLogDateDir(date, true)])
-    );
-    const namesByDir = await Promise.all(
-      candidateDirs.map(async dateDir => {
-        try {
-          return (await readdir(dateDir)).map(name => ({ dateDir, name }));
-        } catch {
-          return [];
-        }
-      })
-    );
-    const entries = await Promise.all(
-      namesByDir
-        .flat()
-        .filter(({ name }) => name.startsWith("codex-desktop-") && name.endsWith(".log"))
-        .map(async ({ dateDir, name }) => {
-          const fullPath = path.join(dateDir, name);
-          const fileStat = await stat(fullPath);
-          return { fullPath, mtimeMs: fileStat.mtimeMs };
-        })
-    );
-    const recentFiles = entries.sort((left, right) => right.mtimeMs - left.mtimeMs).slice(0, 6);
-    const conversations = new Map();
-
-    for (const file of recentFiles) {
-      const content = await readFile(file.fullPath, "utf8");
-      const lines = content.split(/\r?\n/);
-
-      for (const line of lines) {
-        const eventMatch = line.match(
-          /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z).+conversationId=([0-9a-f-]+).+method=(turn\/start|turn\/steer|turn\/interrupt|thread\/metadata\/update|thread\/name\/set|thread\/rollback)/
-        );
-        if (eventMatch) {
-          const [, timestamp, conversationId, method] = eventMatch;
-          const current = conversations.get(conversationId) || {
-            conversationId,
-            updatedAt: timestamp,
-            lastMethod: method,
-            lastStartAt: null,
-            lastActivityAt: null,
-            lastStopAt: null,
-            filePath: file.fullPath
-          };
-          current.updatedAt = timestamp;
-          current.lastMethod = method;
-          current.filePath = file.fullPath;
-          if (method === "turn/start") {
-            current.lastStartAt = timestamp;
-            current.lastActivityAt = timestamp;
-          } else if (method === "turn/steer" || method === "thread/metadata/update") {
-            current.lastActivityAt = timestamp;
-          } else if (method === "turn/interrupt" || method === "thread/rollback") {
-            current.lastStopAt = timestamp;
-          }
-          conversations.set(conversationId, current);
-        }
-
-        const completeMatch = line.match(
-          /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z).+show turn-complete conversationId=([0-9a-f-]+)/
-        );
-        if (completeMatch) {
-          const [, timestamp, conversationId] = completeMatch;
-          const current = conversations.get(conversationId) || {
-            conversationId,
-            updatedAt: timestamp,
-            lastMethod: "turn/complete",
-            lastStartAt: null,
-            lastActivityAt: null,
-            lastStopAt: null,
-            filePath: file.fullPath
-          };
-          current.updatedAt = timestamp;
-          current.lastMethod = "turn/complete";
-          current.lastStopAt = timestamp;
-          current.filePath = file.fullPath;
-          conversations.set(conversationId, current);
-        }
-      }
-    }
-
-    const candidateConversations = Array.from(conversations.values())
-      .map(conversation => {
-        const lastStartMs = conversation.lastStartAt ? Date.parse(conversation.lastStartAt) : NaN;
-        const lastActivityMs = conversation.lastActivityAt ? Date.parse(conversation.lastActivityAt) : NaN;
-        const lastStopMs = conversation.lastStopAt ? Date.parse(conversation.lastStopAt) : NaN;
-        const latestRunSignalMs = Number.isNaN(lastActivityMs) ? lastStartMs : Math.max(lastStartMs, lastActivityMs);
-        const hasRunSignal = !Number.isNaN(latestRunSignalMs);
-        const latestVisibleMs = hasRunSignal
-          ? latestRunSignalMs
-          : !Number.isNaN(lastStopMs)
-            ? lastStopMs
-            : NaN;
-
-        if (Number.isNaN(latestVisibleMs)) {
-          return null;
-        }
-
-        let status = "running";
-        let detail = "Aktiver Thread";
-        if (!Number.isNaN(lastStopMs) && (Number.isNaN(latestRunSignalMs) || lastStopMs >= latestRunSignalMs)) {
-          if (Date.now() - lastStopMs > THREAD_DONE_WINDOW_MS) {
-            return null;
-          }
-          status = "done";
-          detail = "Antwort fertig";
-        }
-        else if (!hasRunSignal || Date.now() - latestRunSignalMs > THREAD_RUNNING_WINDOW_MS) {
-          return null;
-        }
-        return {
-          ...conversation,
-          latestVisibleAt: new Date(latestVisibleMs).toISOString(),
-          status,
-          detail
-        };
-      })
-      .filter(Boolean)
-      .sort((left, right) => {
-        const leftMs = Date.parse(left.latestVisibleAt || left.updatedAt);
-        const rightMs = Date.parse(right.latestVisibleAt || right.updatedAt);
-        return rightMs - leftMs;
-      })
-      .filter(conversation => {
-        if (conversation.status === "done") {
-          return Date.now() - Date.parse(conversation.latestVisibleAt || conversation.updatedAt) <= THREAD_DONE_WINDOW_MS;
-        }
-        return true;
-      });
-
-    const dedupedConversations = [];
-    const seenLabels = new Set();
-    for (const conversation of candidateConversations) {
-      const resolvedLabel = String(threadNames[conversation.conversationId] || "").trim();
-      const dedupeKey = resolvedLabel ? resolvedLabel.toLowerCase() : "";
-      if (dedupeKey && seenLabels.has(dedupeKey)) {
-        continue;
-      }
-      if (dedupeKey) {
-        seenLabels.add(dedupeKey);
-      }
-      dedupedConversations.push(conversation);
-    }
-
-    return dedupedConversations
-      .slice(0, 4)
-      .map((conversation, index) => ({
-        slot: index + 1,
-        label: String(threadNames[conversation.conversationId] || "").trim() || `Chat ${index + 1}`,
-        status: conversation.status,
-        detail: conversation.detail,
-        updatedAt: conversation.latestVisibleAt || conversation.updatedAt,
-        startedAt: conversation.lastStartAt || conversation.updatedAt,
-        threadOrTaskId: conversation.conversationId,
-        exitCode: null,
-        pid: null,
-        heartbeatAt: conversation.latestVisibleAt || conversation.updatedAt,
-        autodetected: false,
-        source: "codex"
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function overlayDiscoveredConversations(slots, conversations) {
-  const trackedThreads = new Set(slots.map(slot => slot.threadOrTaskId).filter(Boolean));
-  const candidates = conversations.filter(conversation => !trackedThreads.has(conversation.threadOrTaskId));
-  let candidateIndex = 0;
-
-  return slots.map(slot => {
-    if (slot.status !== "idle") {
-      return slot;
-    }
-    const conversation = candidates[candidateIndex];
-    if (!conversation) {
-      return slot;
-    }
-    candidateIndex += 1;
-    return {
-      ...slot,
-      ...conversation,
-      slot: slot.slot
-    };
-  });
-}
-
 async function loadEffectiveSlots() {
   const storedSlots = withHeartbeatTimeout(await readSlots());
   const cleanedSlots = storedSlots.map(slot => {
-    const isEphemeralSource = slot.source === "codex" || slot.source === "process";
-    const isLegacyCodexOverlay =
-      !slot.pid &&
-      typeof slot.threadOrTaskId === "string" &&
-      slot.threadOrTaskId &&
-      ["Aktiver Thread", "Antwort fertig"].includes(String(slot.detail || ""));
+    const isEphemeralSource = slot.source === "process";
     const isLegacyProcessOverlay =
       slot.autodetected ||
       (String(slot.detail || "") === "Codex aktiv" && /^Codex (Desktop|Service)/.test(String(slot.label || "")));
 
-    if (!isEphemeralSource && !isLegacyCodexOverlay && !isLegacyProcessOverlay) {
+    if (!isEphemeralSource && !isLegacyProcessOverlay) {
       return slot;
     }
 
@@ -906,14 +664,11 @@ async function loadEffectiveSlots() {
     .map(thread => threadToSlotState(thread, threadNames))
     .sort((left, right) => left.slot - right.slot);
   const withExplicitThreads = overlayExplicitThreads(cleanedSlots, explicitThreadSlots);
-  const shouldUseCodexFallback = ENABLE_CODEX_LOG_AUTODETECT && explicitThreadSlots.length === 0;
-  const discoveredConversations = shouldUseCodexFallback ? await discoverCodexConversations() : [];
-  const withConversations = overlayDiscoveredConversations(withExplicitThreads, discoveredConversations);
   if (!ENABLE_PROCESS_AUTODETECT) {
-    return withConversations;
+    return withExplicitThreads;
   }
   const discoveredProcesses = await discoverCodexProcesses();
-  return overlayDiscoveredProcesses(withConversations, discoveredProcesses);
+  return overlayDiscoveredProcesses(withExplicitThreads, discoveredProcesses);
 }
 
 async function loadEffectiveAgents() {
