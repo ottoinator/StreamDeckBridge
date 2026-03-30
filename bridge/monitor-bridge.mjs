@@ -29,6 +29,8 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
+const STATE_STREAM_HEARTBEAT_MS = 15_000;
+const stateStreamClients = new Set();
 function parseOptionalNumber(value, fallback = undefined) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -1474,6 +1476,23 @@ async function getCachedNoahMonitor() {
   return noahMonitorInflight;
 }
 
+function refreshNoahMonitorInBackground() {
+  if (noahMonitorInflight) {
+    return;
+  }
+  if (noahMonitorCache.result && Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS) {
+    return;
+  }
+  void getCachedNoahMonitor()
+    .then(() => broadcastStateStream().catch(() => {}))
+    .catch(() => {});
+}
+
+function getImmediateNoahMonitor() {
+  refreshNoahMonitorInBackground();
+  return noahMonitorCache.result || makeNoahProbeFallback("Warte auf Probe");
+}
+
 function buildNoahTiles(summary) {
   const updatedAt = summary?.checked_at || nowIso();
   if (summary?.error) {
@@ -1573,6 +1592,7 @@ async function updateSlot(slotNumber, patch) {
   const slotIndex = normalizeSlot(slotNumber) - 1;
   slots[slotIndex] = applyPatch(slots[slotIndex], patch);
   await writeSlots(slots);
+  void broadcastStateStream().catch(() => {});
   return slots[slotIndex];
 }
 
@@ -1582,6 +1602,7 @@ async function updateAgent(agentName, patch) {
   const index = AGENT_ORDER.indexOf(name);
   agents[index] = applyAgentPatch(agents[index], patch);
   await writeAgents(agents);
+  void broadcastStateStream().catch(() => {});
   return agents[index];
 }
 
@@ -1612,6 +1633,7 @@ async function clearThread(threadId) {
   const threads = await readThreads();
   const remaining = threads.filter(thread => thread.threadId !== normalizedThreadId);
   await writeThreads(normalizeExplicitThreads(remaining));
+  void broadcastStateStream().catch(() => {});
   return {
     threadId: normalizedThreadId,
     cleared: true
@@ -1656,6 +1678,7 @@ async function updateThread(threadId, patch = {}) {
 
   const normalizedThreads = normalizeExplicitThreads(threads);
   await writeThreads(normalizedThreads);
+  void broadcastStateStream().catch(() => {});
   return normalizedThreads.find(thread => thread.threadId === normalizedThreadId) || next;
 }
 
@@ -1665,9 +1688,20 @@ async function setThreadName(threadId, label) {
     throw new Error("thread id is required");
   }
   const normalizedLabel = await rememberThreadLabel(normalizedThreadId, label);
+  void broadcastStateStream().catch(() => {});
   return {
     threadOrTaskId: normalizedThreadId,
     label: normalizedLabel
+  };
+}
+
+async function buildMonitorState(options = {}) {
+  const noahSummary = options.awaitNoahMonitor ? await getCachedNoahMonitor() : getImmediateNoahMonitor();
+  return {
+    slots: await loadEffectiveSlots(),
+    agents: await loadEffectiveAgents(),
+    threads: await loadExplicitThreads(),
+    noahTiles: buildNoahTiles(noahSummary)
   };
 }
 
@@ -1677,6 +1711,58 @@ function sendJson(res, statusCode, data) {
     "Cache-Control": "no-store"
   });
   res.end(`${JSON.stringify(data, null, 2)}\n`);
+}
+
+function sendSseEvent(res, eventName, payload) {
+  res.write(`event: ${eventName}\n`);
+  const body = JSON.stringify(payload);
+  for (const line of body.split(/\r?\n/)) {
+    res.write(`data: ${line}\n`);
+  }
+  res.write("\n");
+}
+
+function removeStateStreamClient(client) {
+  clearInterval(client.heartbeat);
+  stateStreamClients.delete(client);
+}
+
+function attachStateStreamClient(req, res) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive"
+  });
+  res.write(": connected\n\n");
+  const client = {
+    res,
+    heartbeat: setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        removeStateStreamClient(client);
+      }
+    }, STATE_STREAM_HEARTBEAT_MS)
+  };
+  stateStreamClients.add(client);
+  const cleanup = () => removeStateStreamClient(client);
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+  return client;
+}
+
+async function broadcastStateStream() {
+  if (!stateStreamClients.size) {
+    return;
+  }
+  const state = await buildMonitorState();
+  for (const client of Array.from(stateStreamClients)) {
+    try {
+      sendSseEvent(client.res, "state", state);
+    } catch {
+      removeStateStreamClient(client);
+    }
+  }
 }
 
 function readBearerToken(req) {
@@ -1832,13 +1918,14 @@ async function serve() {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/events") {
+        const client = attachStateStreamClient(req, res);
+        sendSseEvent(client.res, "state", await buildMonitorState());
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/state") {
-        sendJson(res, 200, {
-          slots: await loadEffectiveSlots(),
-          agents: await loadEffectiveAgents(),
-          threads: await loadExplicitThreads(),
-          noahTiles: buildNoahTiles(await getCachedNoahMonitor())
-        });
+        sendJson(res, 200, await buildMonitorState({ awaitNoahMonitor: true }));
         return;
       }
 
@@ -1980,12 +2067,7 @@ async function main() {
     case "state":
       console.log(
         JSON.stringify(
-          {
-            slots: await loadEffectiveSlots(),
-            agents: await loadEffectiveAgents(),
-            threads: await loadExplicitThreads(),
-            noahTiles: buildNoahTiles(await getCachedNoahMonitor())
-          },
+          await buildMonitorState({ awaitNoahMonitor: true }),
           null,
           2
         )

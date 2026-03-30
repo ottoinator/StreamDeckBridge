@@ -33,13 +33,12 @@ export abstract class BaseAgentAction extends SingletonAction<Record<string, nev
 
   static async updateAgents(agents: AgentState[]): Promise<void> {
     BaseAgentAction.currentAgents = agents;
-    const updates = agents.flatMap(agent => {
-      const actions = BaseAgentAction.visibleActions.get(agent.name);
-      if (!actions?.size) {
-        return [];
-      }
-      return Array.from(actions.values()).map(action => BaseAgentAction.render(action, agent));
-    });
+    const updates = BaseAgentAction.buildRenderJobs(agents);
+    await Promise.all(updates);
+  }
+
+  static async refreshVisibleActions(): Promise<void> {
+    const updates = BaseAgentAction.buildRenderJobs(BaseAgentAction.currentAgents);
     await Promise.all(updates);
   }
 
@@ -50,5 +49,15 @@ export abstract class BaseAgentAction extends SingletonAction<Record<string, nev
   private static async render(action: VisibleAction, agent: AgentState): Promise<void> {
     await action.setTitle("");
     await action.setImage(agentSvg(agent));
+  }
+
+  private static buildRenderJobs(agents: AgentState[]): Promise<void>[] {
+    return agents.flatMap(agent => {
+      const actions = BaseAgentAction.visibleActions.get(agent.name);
+      if (!actions?.size) {
+        return [];
+      }
+      return Array.from(actions.values()).map(action => BaseAgentAction.render(action, agent));
+    });
   }
 }
