@@ -57,7 +57,7 @@ const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: 
 };
 
 const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dimColor: string; dot: string; dimDot: string }> = {
-  online: { title: "ONLINE", color: "#14532d", dimColor: "#0b2e1a", dot: "#86efac", dimDot: "#1f6b3a" },
+  online: { title: "BEREIT", color: "#1f2937", dimColor: "#111827", dot: "#93a4b8", dimDot: "#4b5563" },
   attention: { title: "ACHTUNG", color: "#a16207", dimColor: "#6c4305", dot: "#fde047", dimDot: "#8a6708" },
   offline: { title: "OFFLINE", color: "#7f1d1d", dimColor: "#4d1010", dot: "#fca5a5", dimDot: "#5f1414" }
 };
@@ -330,11 +330,40 @@ export function agentSvg(agent: AgentState): string {
   const detailLines = wrapText(agent.detail || meta.title, 12, 2);
   const blinkOn = isBlinkPhaseOn();
   const isBlinking = isAgentBlinking(agent);
-  const backgroundColor = isBlinking && !blinkOn ? meta.dimColor : meta.color;
-  const lampColor = isBlinking && !blinkOn ? meta.dimDot : meta.dot;
-  const haloOpacity = isBlinking ? (blinkOn ? "0.34" : "0.05") : "0.18";
-  const lampRadius = isBlinking ? (blinkOn ? 10 : 6) : 8;
-  const footer = agent.status === "online" && isBlinking ? "AKTIV" : meta.title;
+  const isOnlineActive = agent.status === "online" && isBlinking;
+  const backgroundColor =
+    agent.status === "attention"
+      ? blinkOn
+        ? meta.color
+        : meta.dimColor
+      : isOnlineActive
+        ? blinkOn
+          ? "#14532d"
+          : "#0b2e1a"
+        : meta.color;
+  const lampColor =
+    agent.status === "attention"
+      ? blinkOn
+        ? meta.dot
+        : meta.dimDot
+      : isOnlineActive
+        ? blinkOn
+          ? "#86efac"
+          : "#1f6b3a"
+        : meta.dot;
+  const haloOpacity =
+    agent.status === "attention" || isOnlineActive
+      ? blinkOn
+        ? "0.34"
+        : "0.05"
+      : "0.08";
+  const lampRadius =
+    agent.status === "attention" || isOnlineActive
+      ? blinkOn
+        ? 10
+        : 6
+      : 7;
+  const footer = agent.status === "online" && isOnlineActive ? "AKTIV" : meta.title;
 
   const titleSvg = titleLines
     .map((line, index) => `<text x="36" y="${20 + index * 10}" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)

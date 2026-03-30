@@ -21,6 +21,8 @@ const execFileAsync = promisify(execFile);
 const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const AGENT_PROBE_TTL_MS = 15_000;
 const NOAH_MONITOR_TTL_MS = 15_000;
+const PUSH_ONLY_AGENT_STATES = process.env.CODEX_MONITOR_AGENT_PUSH_ONLY === "1";
+const AGENT_PUSH_TOKEN = String(process.env.CODEX_MONITOR_AGENT_PUSH_TOKEN || "").trim();
 const THREAD_HEARTBEAT_TIMEOUT_MS = Number(process.env.CODEX_MONITOR_THREAD_HEARTBEAT_TIMEOUT_MS || 180_000);
 const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS || 900_000);
 const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_INPUT_TTL_MS || 86_400_000);
@@ -921,6 +923,10 @@ async function loadEffectiveAgents() {
       blinkUntil: null
     });
   });
+  if (PUSH_ONLY_AGENT_STATES) {
+    await writeAgents(heartbeatNormalized);
+    return heartbeatNormalized;
+  }
   const remotelyProbed = await overlayRemoteAgentStates(heartbeatNormalized);
   await writeAgents(remotelyProbed);
   return remotelyProbed;
@@ -1673,6 +1679,21 @@ function sendJson(res, statusCode, data) {
   res.end(`${JSON.stringify(data, null, 2)}\n`);
 }
 
+function readBearerToken(req) {
+  const header = String(req.headers.authorization || "").trim();
+  if (!header.toLowerCase().startsWith("bearer ")) {
+    return "";
+  }
+  return header.slice("Bearer ".length).trim();
+}
+
+function isAuthorizedAgentPush(req) {
+  if (!AGENT_PUSH_TOKEN) {
+    return true;
+  }
+  return readBearerToken(req) === AGENT_PUSH_TOKEN;
+}
+
 function parseArgs(argv) {
   const args = { _: [] };
   for (let index = 0; index < argv.length; index += 1) {
@@ -1857,6 +1878,10 @@ async function serve() {
 
       const agentMatch = url.pathname.match(/^\/agents\/([a-z]+)$/);
       if (req.method === "POST" && agentMatch) {
+        if (!isAuthorizedAgentPush(req)) {
+          sendJson(res, 401, { error: "Unauthorized" });
+          return;
+        }
         const body = await parseBody(req);
         const normalizedStatus = body.status !== undefined ? normalizeAgentStatus(body.status) : undefined;
         const activity = parseBooleanFlag(body.activity, false);
