@@ -29,7 +29,6 @@ const execFileAsync = promisify(execFile);
 const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const AGENT_PROBE_TTL_MS = 15_000;
 const THREAD_RUNNING_WINDOW_MS = 300_000;
-const SECONDARY_THREAD_RUNNING_WINDOW_MS = 90_000;
 const THREAD_DONE_WINDOW_MS = 120_000;
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
@@ -562,27 +561,6 @@ async function discoverCodexConversations() {
         const leftMs = Date.parse(left.latestVisibleAt || left.updatedAt);
         const rightMs = Date.parse(right.latestVisibleAt || right.updatedAt);
         return rightMs - leftMs;
-      })
-      .map((conversation, index, list) => {
-        if (conversation.status !== "running" || index === 0) {
-          return conversation;
-        }
-
-        const freshest = list[0];
-        const freshnessAgeMs = Date.now() - Date.parse(conversation.latestVisibleAt || conversation.updatedAt);
-        const freshnessDeltaMs =
-          Date.parse(freshest.latestVisibleAt || freshest.updatedAt) -
-          Date.parse(conversation.latestVisibleAt || conversation.updatedAt);
-
-        if (freshnessAgeMs > SECONDARY_THREAD_RUNNING_WINDOW_MS || freshnessDeltaMs > SECONDARY_THREAD_RUNNING_WINDOW_MS) {
-          return {
-            ...conversation,
-            status: "done",
-            detail: "Antwort fertig"
-          };
-        }
-
-        return conversation;
       })
       .filter(conversation => {
         if (conversation.status === "done") {
