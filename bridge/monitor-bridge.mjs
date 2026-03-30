@@ -681,10 +681,20 @@ function normalizeExplicitThreads(threads) {
     .sort(compareThreadFreshness);
 }
 
-function threadToSlotState(thread, threadNames) {
+function getThreadBaseLabel(thread, threadNames) {
+  return thread.label || String(threadNames[thread.threadId] || "").trim() || `Chat ${thread.slot}`;
+}
+
+function getShortThreadToken(threadId) {
+  const firstSegment = String(threadId || "").split("-")[0] || String(threadId || "");
+  const alnum = firstSegment.replace(/[^a-zA-Z0-9]/g, "");
+  return (alnum.slice(-4) || String(threadId || "").slice(-4) || "CHAT").toUpperCase();
+}
+
+function threadToSlotState(thread, threadNames, displayLabel = "") {
   return {
     slot: thread.slot,
-    label: thread.label || String(threadNames[thread.threadId] || "").trim() || `Chat ${thread.slot}`,
+    label: displayLabel || getThreadBaseLabel(thread, threadNames),
     status: thread.status,
     detail: thread.detail || (thread.status === "running" ? "Aktiver Thread" : "Thread aktiv"),
     updatedAt: thread.updatedAt,
@@ -696,6 +706,27 @@ function threadToSlotState(thread, threadNames) {
     autodetected: false,
     source: thread.source || "codex-app"
   };
+}
+
+function buildExplicitThreadSlotStates(threads, threadNames) {
+  const visibleThreads = threads.filter(thread => thread.slot !== null);
+  const labelCounts = new Map();
+
+  for (const thread of visibleThreads) {
+    const baseLabel = getThreadBaseLabel(thread, threadNames);
+    const key = baseLabel.trim().toLowerCase();
+    labelCounts.set(key, (labelCounts.get(key) || 0) + 1);
+  }
+
+  return visibleThreads
+    .map(thread => {
+      const baseLabel = getThreadBaseLabel(thread, threadNames);
+      const key = baseLabel.trim().toLowerCase();
+      const duplicateCount = labelCounts.get(key) || 0;
+      const displayLabel = duplicateCount > 1 ? `Chat ${getShortThreadToken(thread.threadId)}` : baseLabel;
+      return threadToSlotState(thread, threadNames, displayLabel);
+    })
+    .sort((left, right) => left.slot - right.slot);
 }
 
 function overlayExplicitThreads(slots, threadSlots) {
@@ -820,10 +851,7 @@ async function loadEffectiveSlots() {
 
   const threadNames = await readThreadNames();
   const explicitThreads = await loadExplicitThreads();
-  const explicitThreadSlots = explicitThreads
-    .filter(thread => thread.slot !== null)
-    .map(thread => threadToSlotState(thread, threadNames))
-    .sort((left, right) => left.slot - right.slot);
+  const explicitThreadSlots = buildExplicitThreadSlotStates(explicitThreads, threadNames);
   const withExplicitThreads = overlayExplicitThreads(cleanedSlots, explicitThreadSlots);
   if (!ENABLE_PROCESS_AUTODETECT) {
     return withExplicitThreads;
