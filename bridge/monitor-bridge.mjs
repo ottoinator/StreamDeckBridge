@@ -604,11 +604,15 @@ function applyThreadPatch(thread, patch) {
   if (patch.label !== undefined) next.label = String(patch.label || "").trim();
   if (patch.status !== undefined) {
     const status = normalizeStatus(String(patch.status));
+    const isReactivation = status === "running" && thread.status !== "running";
     next.status = status;
     if (status === "running") {
-      next.startedAt = patch.startedAt || thread.startedAt || nowIso();
+      next.startedAt = patch.startedAt || (isReactivation ? nowIso() : thread.startedAt || nowIso());
       next.finishedAt = null;
       next.heartbeatAt = patch.heartbeatAt || nowIso();
+      if (patch.detail === undefined && isReactivation) {
+        next.detail = "Aktiver Thread";
+      }
       if (patch.exitCode === undefined) {
         next.exitCode = null;
       }
