@@ -9,6 +9,7 @@
     "bridge": "node bridge/monitor-bridge.mjs serve",
     "bridge:init": "node bridge/monitor-bridge.mjs init",
     "bridge:slots": "node bridge/monitor-bridge.mjs list",
+    "bridge:threads": "node bridge/monitor-bridge.mjs threads",
     "bridge:state": "node bridge/monitor-bridge.mjs state",
     "plugin:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-plugin.ps1",
     "plugin:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/uninstall-plugin.ps1",

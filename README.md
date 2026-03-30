@@ -7,6 +7,11 @@ Die Loesung besteht aus zwei Teilen:
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
 - `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten plus 2 Agenten-Leuchten fuer `Noah` und `Carmen`
 
+Fuer Codex-Chats gibt es jetzt zusaetzlich einen expliziten Meldeweg:
+
+- `scripts/codex-bridge-thread.ps1`: registriert den aktuellen Chat ueber `CODEX_THREAD_ID`, sendet Heartbeats und setzt `needs_input`, `done` oder `error`
+- `plugins/codex-bridge-reporter`: repo-lokales Codex-Plugin mit Skill-Doku fuer denselben Ablauf
+
 ## Statusmodell
 
 Jeder Slot hat diese Felder:
@@ -26,6 +31,51 @@ Gueltige Stati:
 - `needs_input`
 - `error`
 - `done`
+
+## Empfohlener Modus fuer Codex-Chats
+
+Die Bridge arbeitet jetzt explizit thread-basiert:
+
+- aktive Codex-Chats registrieren sich selbst ueber `CODEX_THREAD_ID`
+- Heartbeats halten den Slot sauber auf `running`
+- `needs_input`, `done` und `error` kommen direkt vom Chat statt aus Log-Raten
+- die alte Codex-Log-Erkennung bleibt nur noch Fallback, wenn keine expliziten Threads gemeldet sind
+
+Chat registrieren und Heartbeat-Loop starten:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action register -Watch
+```
+
+Zwischenstand senden:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action progress -Detail "Analysiert Bridge"
+```
+
+Rueckfrage signalisieren:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action needs_input -Detail "Architektur offen"
+```
+
+Erfolgreich abschliessen:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action done -Detail "Fertig"
+```
+
+Fehler signalisieren:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action error -Detail "Build fehlgeschlagen" -ExitCode 1
+```
+
+Thread aus der Bridge entfernen:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action clear
+```
 
 ## Schnellstart
 
@@ -161,8 +211,11 @@ Der Prozess wird auf `running` gesetzt und beim Exit automatisch auf `done` oder
 - `GET http://127.0.0.1:4567/state`
 - `GET http://127.0.0.1:4567/slots`
 - `GET http://127.0.0.1:4567/agents`
+- `GET http://127.0.0.1:4567/threads`
 - `POST http://127.0.0.1:4567/slots/:slot`
 - `POST http://127.0.0.1:4567/agents/:name`
+- `POST http://127.0.0.1:4567/threads/:threadId`
+- `POST http://127.0.0.1:4567/threads/:threadId/heartbeat`
 
 Beispiel:
 
@@ -172,6 +225,14 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/slots/3 -ContentType '
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/agents/noah -ContentType 'application/json' -Body '{"status":"online","detail":"Verarbeitet Daten","activity":true,"label":"Noah"}'
+```
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/threads/019d3dd0-ab21-7ee2-8de7-9286d91fd792 -ContentType 'application/json' -Body '{"status":"needs_input","detail":"Bitte entscheiden","label":"Stream Deck Integration"}'
+```
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4567/threads/019d3dd0-ab21-7ee2-8de7-9286d91fd792/heartbeat -ContentType 'application/json' -Body '{"status":"running","detail":"Implementiert","label":"Stream Deck Integration"}'
 ```
 
 ## Persistenz
@@ -184,6 +245,10 @@ Der letzte Zustand liegt hier:
 
 ```text
 %APPDATA%\CodexStreamDeckMonitor\agents.json
+```
+
+```text
+%APPDATA%\CodexStreamDeckMonitor\threads.json
 ```
 
 Damit bleibt der Status auch nach einem Stream-Deck-Neustart erhalten.

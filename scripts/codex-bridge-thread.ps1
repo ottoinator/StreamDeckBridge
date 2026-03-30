@@ -1,0 +1,319 @@
+[CmdletBinding()]
+param(
+    [ValidateSet("register", "progress", "heartbeat", "needs_input", "done", "error", "clear", "watch-start", "watch-stop", "watch-loop")]
+    [string]$Action = "heartbeat",
+    [string]$ThreadId = $env:CODEX_THREAD_ID,
+    [string]$Label = "",
+    [string]$Detail = "",
+    [string]$BridgeUrl = $(if ($env:CODEX_MONITOR_BASE_URL) { $env:CODEX_MONITOR_BASE_URL } else { "http://127.0.0.1:4567" }),
+    [int]$Slot = 0,
+    [int]$ExitCode = 1,
+    [int]$IntervalSeconds = 20,
+    [switch]$Watch
+)
+
+$ErrorActionPreference = "Stop"
+
+function Get-NowIso {
+    return [DateTime]::UtcNow.ToString("o")
+}
+
+function Get-DefaultLabel {
+    $leaf = Split-Path -Leaf (Get-Location).Path
+    if ([string]::IsNullOrWhiteSpace($leaf)) {
+        return "Codex Chat"
+    }
+    return $leaf
+}
+
+function Get-NormalizedThreadId {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "CODEX_THREAD_ID fehlt. Setze -ThreadId explizit oder starte das Script in einem Codex-Chat."
+    }
+    return $Value.Trim()
+}
+
+function Get-ThreadUri {
+    param([string]$BaseUrl, [string]$CurrentThreadId)
+    $trimmedBase = $BaseUrl.TrimEnd("/")
+    $encodedThreadId = [Uri]::EscapeDataString($CurrentThreadId)
+    return "$trimmedBase/threads/$encodedThreadId"
+}
+
+function Get-WatcherDirectory {
+    $appData = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME "AppData\\Roaming" }
+    return Join-Path $appData "CodexStreamDeckMonitor\\watchers"
+}
+
+function Get-WatcherStatePath {
+    param([string]$CurrentThreadId)
+    return Join-Path (Get-WatcherDirectory) "$CurrentThreadId.json"
+}
+
+function Read-WatcherState {
+    param([string]$CurrentThreadId)
+    $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    try {
+        return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Write-WatcherState {
+    param(
+        [string]$CurrentThreadId,
+        [string]$CurrentLabel,
+        [string]$CurrentDetail,
+        [int]$CurrentSlot,
+        [int]$CurrentIntervalSeconds,
+        [int]$WatcherPid = 0
+    )
+    $directory = Get-WatcherDirectory
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+    }
+    $state = [ordered]@{
+        threadId = $CurrentThreadId
+        label = $CurrentLabel
+        detail = $CurrentDetail
+        slot = $(if ($CurrentSlot -gt 0) { $CurrentSlot } else { $null })
+        intervalSeconds = $CurrentIntervalSeconds
+        pid = $(if ($WatcherPid -gt 0) { $WatcherPid } else { $null })
+        updatedAt = Get-NowIso
+    }
+    $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
+    ($state | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Remove-WatcherState {
+    param([string]$CurrentThreadId)
+    $path = Get-WatcherStatePath -CurrentThreadId $CurrentThreadId
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
+function Update-WatcherMetadata {
+    param(
+        [string]$CurrentThreadId,
+        [string]$CurrentLabel,
+        [string]$CurrentDetail,
+        [int]$CurrentSlot,
+        [int]$CurrentIntervalSeconds
+    )
+    $existing = Read-WatcherState -CurrentThreadId $CurrentThreadId
+    if ($null -eq $existing) {
+        return
+    }
+    $labelToWrite = if ([string]::IsNullOrWhiteSpace($CurrentLabel)) { [string]$existing.label } else { $CurrentLabel }
+    $detailToWrite = if ([string]::IsNullOrWhiteSpace($CurrentDetail)) { [string]$existing.detail } else { $CurrentDetail }
+    $existingSlot = if ($null -ne $existing.slot) { [int]$existing.slot } else { 0 }
+    $existingInterval = if ($null -ne $existing.intervalSeconds) { [int]$existing.intervalSeconds } else { 20 }
+    $existingPid = if ($null -ne $existing.pid) { [int]$existing.pid } else { 0 }
+    $slotToWrite = if ($CurrentSlot -gt 0) { $CurrentSlot } else { $existingSlot }
+    $intervalToWrite = if ($CurrentIntervalSeconds -gt 0) { $CurrentIntervalSeconds } else { $existingInterval }
+    $pidToWrite = $existingPid
+    Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $labelToWrite -CurrentDetail $detailToWrite -CurrentSlot $slotToWrite -CurrentIntervalSeconds $intervalToWrite -WatcherPid $pidToWrite
+}
+
+function Test-WatcherRunning {
+    param([string]$CurrentThreadId)
+    $state = Read-WatcherState -CurrentThreadId $CurrentThreadId
+    if ($null -eq $state -or -not $state.pid) {
+        return $false
+    }
+    try {
+        $null = Get-Process -Id ([int]$state.pid) -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-BridgePost {
+    param(
+        [string]$Uri,
+        [hashtable]$Body
+    )
+    $json = $Body | ConvertTo-Json -Depth 6 -Compress
+    return Invoke-RestMethod -Method Post -Uri $Uri -ContentType "application/json" -Body $json
+}
+
+function Start-Watcher {
+    param(
+        [string]$CurrentThreadId,
+        [string]$CurrentLabel,
+        [string]$CurrentDetail,
+        [string]$CurrentBridgeUrl,
+        [int]$CurrentSlot,
+        [int]$CurrentIntervalSeconds
+    )
+    if (Test-WatcherRunning -CurrentThreadId $CurrentThreadId) {
+        Update-WatcherMetadata -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds
+        return Read-WatcherState -CurrentThreadId $CurrentThreadId
+    }
+
+    Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $PSCommandPath,
+        "-Action", "watch-loop",
+        "-ThreadId", $CurrentThreadId,
+        "-BridgeUrl", $CurrentBridgeUrl,
+        "-IntervalSeconds", $CurrentIntervalSeconds
+    )
+    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    Write-WatcherState -CurrentThreadId $CurrentThreadId -CurrentLabel $CurrentLabel -CurrentDetail $CurrentDetail -CurrentSlot $CurrentSlot -CurrentIntervalSeconds $CurrentIntervalSeconds -WatcherPid $process.Id
+    return Read-WatcherState -CurrentThreadId $CurrentThreadId
+}
+
+function Stop-Watcher {
+    param([string]$CurrentThreadId)
+    $state = Read-WatcherState -CurrentThreadId $CurrentThreadId
+    Remove-WatcherState -CurrentThreadId $CurrentThreadId
+    if ($null -ne $state -and $state.pid) {
+        try {
+            Stop-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
+        } catch {
+        }
+    }
+}
+
+function Invoke-WatchLoop {
+    param(
+        [string]$CurrentThreadId,
+        [string]$CurrentBridgeUrl,
+        [int]$CurrentIntervalSeconds
+    )
+    $threadUri = Get-ThreadUri -BaseUrl $CurrentBridgeUrl -CurrentThreadId $CurrentThreadId
+    while ($true) {
+        $state = Read-WatcherState -CurrentThreadId $CurrentThreadId
+        if ($null -eq $state) {
+            break
+        }
+        $payload = @{
+            status = "running"
+            heartbeat = $true
+            source = "codex-app"
+            label = if ([string]::IsNullOrWhiteSpace([string]$state.label)) { Get-DefaultLabel } else { [string]$state.label }
+            detail = if ([string]::IsNullOrWhiteSpace([string]$state.detail)) { "Codex arbeitet" } else { [string]$state.detail }
+        }
+        if ($state.slot) {
+            $payload.slot = [int]$state.slot
+        }
+        try {
+            Invoke-BridgePost -Uri "$threadUri/heartbeat" -Body $payload | Out-Null
+        } catch {
+        }
+        Start-Sleep -Seconds ([Math]::Max(5, $CurrentIntervalSeconds))
+    }
+}
+
+$resolvedThreadId = Get-NormalizedThreadId -Value $ThreadId
+$resolvedLabel = if ([string]::IsNullOrWhiteSpace($Label)) { Get-DefaultLabel } else { $Label.Trim() }
+$threadUri = Get-ThreadUri -BaseUrl $BridgeUrl -CurrentThreadId $resolvedThreadId
+
+switch ($Action) {
+    "watch-start" {
+        $state = Start-Watcher -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $Detail.Trim() -CurrentBridgeUrl $BridgeUrl -CurrentSlot $Slot -CurrentIntervalSeconds $IntervalSeconds
+        $state | ConvertTo-Json -Depth 5
+        return
+    }
+    "watch-stop" {
+        Stop-Watcher -CurrentThreadId $resolvedThreadId
+        @{ threadId = $resolvedThreadId; watcher = "stopped" } | ConvertTo-Json -Depth 5
+        return
+    }
+    "watch-loop" {
+        Invoke-WatchLoop -CurrentThreadId $resolvedThreadId -CurrentBridgeUrl $BridgeUrl -CurrentIntervalSeconds $IntervalSeconds
+        return
+    }
+}
+
+$payload = @{
+    label = $resolvedLabel
+    source = "codex-app"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Detail)) {
+    $payload.detail = $Detail.Trim()
+}
+if ($Slot -gt 0) {
+    $payload.slot = $Slot
+}
+
+$stopWatcher = $false
+$useHeartbeatEndpoint = $false
+
+switch ($Action) {
+    "register" {
+        $payload.status = "running"
+        $payload.heartbeat = $true
+        $payload.startedAt = Get-NowIso
+        $useHeartbeatEndpoint = $true
+    }
+    "progress" {
+        $payload.status = "running"
+        $payload.heartbeat = $true
+        $useHeartbeatEndpoint = $true
+    }
+    "heartbeat" {
+        $payload.status = "running"
+        $payload.heartbeat = $true
+        $useHeartbeatEndpoint = $true
+    }
+    "needs_input" {
+        if (-not $payload.detail) {
+            $payload.detail = "Rueckfrage offen"
+        }
+        $payload.status = "needs_input"
+        $stopWatcher = $true
+    }
+    "done" {
+        if (-not $payload.detail) {
+            $payload.detail = "Erfolgreich beendet"
+        }
+        $payload.status = "done"
+        $payload.exitCode = 0
+        $stopWatcher = $true
+    }
+    "error" {
+        $payload.status = "error"
+        $payload.exitCode = $ExitCode
+        if (-not $payload.detail) {
+            $payload.detail = "Fehler"
+        }
+        $stopWatcher = $true
+    }
+    "clear" {
+        $payload.clear = $true
+        $stopWatcher = $true
+    }
+}
+
+if ($stopWatcher) {
+    Stop-Watcher -CurrentThreadId $resolvedThreadId
+}
+
+if ($Action -eq "clear") {
+    Invoke-BridgePost -Uri $threadUri -Body $payload | ConvertTo-Json -Depth 6
+    return
+}
+
+$targetUri = if ($useHeartbeatEndpoint) { "$threadUri/heartbeat" } else { $threadUri }
+$response = Invoke-BridgePost -Uri $targetUri -Body $payload
+
+if ($Action -in @("register", "progress", "heartbeat")) {
+    Update-WatcherMetadata -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $(if ($payload.detail) { [string]$payload.detail } else { "Codex arbeitet" }) -CurrentSlot $Slot -CurrentIntervalSeconds $IntervalSeconds
+    if ($Watch) {
+        Start-Watcher -CurrentThreadId $resolvedThreadId -CurrentLabel $resolvedLabel -CurrentDetail $(if ($payload.detail) { [string]$payload.detail } else { "Codex arbeitet" }) -CurrentBridgeUrl $BridgeUrl -CurrentSlot $Slot -CurrentIntervalSeconds $IntervalSeconds | Out-Null
+    }
+}
+
+$response | ConvertTo-Json -Depth 6

@@ -1,0 +1,20 @@
+{
+  "name": "stream-deck-local",
+  "interface": {
+    "displayName": "Stream Deck Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "codex-bridge-reporter",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-bridge-reporter"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

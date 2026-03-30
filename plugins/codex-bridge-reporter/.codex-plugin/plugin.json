@@ -1,0 +1,39 @@
+{
+  "name": "codex-bridge-reporter",
+  "version": "0.1.0",
+  "description": "Registers active Codex chats with the local Stream Deck bridge and keeps their status updated.",
+  "author": {
+    "name": "Ottoinator + OpenAI Codex",
+    "email": "support@example.invalid",
+    "url": "https://github.com/ottoinator"
+  },
+  "homepage": "https://github.com/ottoinator/Common",
+  "repository": "https://github.com/ottoinator/Common",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "stream-deck",
+    "bridge",
+    "status"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Bridge Reporter",
+    "shortDescription": "Mirror Codex chat state to the local Stream Deck bridge",
+    "longDescription": "Use a lightweight skill and helper scripts to register each Codex chat with the local bridge, keep heartbeats alive, publish progress, and signal when user input is needed.",
+    "developerName": "Ottoinator + OpenAI Codex",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ottoinator/Common",
+    "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/terms-of-use/",
+    "defaultPrompt": [
+      "Register this Codex chat with the local Stream Deck bridge and keep the status current."
+    ],
+    "brandColor": "#14532D",
+    "screenshots": []
+  }
+}

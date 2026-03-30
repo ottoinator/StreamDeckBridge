@@ -11,6 +11,7 @@ const DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppDa
 const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
+const THREADS_FILE = path.join(DATA_DIR, "threads.json");
 const CODEX_LOG_ROOT = path.join(
   process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
   "Packages",
@@ -28,9 +29,13 @@ const AGENT_ORDER = ["noah", "carmen"];
 const execFileAsync = promisify(execFile);
 const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const AGENT_PROBE_TTL_MS = 15_000;
+const THREAD_HEARTBEAT_TIMEOUT_MS = Number(process.env.CODEX_MONITOR_THREAD_HEARTBEAT_TIMEOUT_MS || 180_000);
+const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS || 900_000);
+const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_INPUT_TTL_MS || 86_400_000);
 const THREAD_RUNNING_WINDOW_MS = 300_000;
 const THREAD_DONE_WINDOW_MS = 120_000;
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
+const ENABLE_CODEX_LOG_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_CODEX !== "0";
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const AGENT_REMOTE_DEFAULTS = {
   noah: {
@@ -117,6 +122,22 @@ function createDefaultAgent(name) {
   };
 }
 
+function createDefaultThread(threadId = "") {
+  return {
+    threadId,
+    slot: null,
+    label: "",
+    status: "running",
+    detail: "Aktiver Thread",
+    updatedAt: nowIso(),
+    startedAt: null,
+    heartbeatAt: null,
+    finishedAt: null,
+    exitCode: null,
+    source: "codex-app"
+  };
+}
+
 async function ensureDataFile() {
   await mkdir(DATA_DIR, { recursive: true });
   try {
@@ -143,6 +164,12 @@ async function ensureDataFile() {
     await readFile(THREAD_NAMES_FILE, "utf8");
   } catch {
     await writeFile(THREAD_NAMES_FILE, "{}\n", "utf8");
+  }
+
+  try {
+    await readFile(THREADS_FILE, "utf8");
+  } catch {
+    await writeFile(THREADS_FILE, "[]\n", "utf8");
   }
 }
 
@@ -207,6 +234,54 @@ async function writeSlots(slots) {
 async function writeAgents(agents) {
   await ensureDataFile();
   await writeFile(AGENTS_FILE, `${JSON.stringify(agents, null, 2)}\n`, "utf8");
+}
+
+async function readThreads() {
+  await ensureDataFile();
+  const raw = await readFile(THREADS_FILE, "utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    await writeThreads([]);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    await writeThreads([]);
+    return [];
+  }
+  return parsed
+    .filter(item => item && typeof item === "object")
+    .map(item => {
+      const thread = item || {};
+      return {
+        ...createDefaultThread(String(thread.threadId || "")),
+        ...thread,
+        threadId: String(thread.threadId || "").trim(),
+        slot:
+          thread.slot === null || thread.slot === undefined || thread.slot === ""
+            ? null
+            : normalizeSlot(thread.slot),
+        label: String(thread.label || "").trim(),
+        detail: String(thread.detail || "").trim(),
+        status: normalizeStatus(String(thread.status || "running")),
+        updatedAt: toIsoDate(thread.updatedAt),
+        startedAt: thread.startedAt ? toIsoDate(thread.startedAt) : null,
+        heartbeatAt: thread.heartbeatAt ? toIsoDate(thread.heartbeatAt) : null,
+        finishedAt: thread.finishedAt ? toIsoDate(thread.finishedAt) : null,
+        exitCode:
+          thread.exitCode === null || thread.exitCode === undefined || thread.exitCode === ""
+            ? null
+            : Number(thread.exitCode),
+        source: String(thread.source || "codex-app")
+      };
+    })
+    .filter(thread => thread.threadId);
+}
+
+async function writeThreads(threads) {
+  await ensureDataFile();
+  await writeFile(THREADS_FILE, `${JSON.stringify(threads, null, 2)}\n`, "utf8");
 }
 
 async function readThreadNames() {
@@ -289,6 +364,14 @@ function normalizeAgentStatus(value) {
   return mapped;
 }
 
+function normalizeThreadId(value) {
+  const threadId = String(value || "").trim();
+  if (!threadId) {
+    throw new Error("thread id is required");
+  }
+  return threadId;
+}
+
 function applyPatch(slot, patch) {
   const next = { ...slot };
   if (patch.label !== undefined) next.label = String(patch.label || slotLabel(slot.slot)).trim() || slotLabel(slot.slot);
@@ -327,6 +410,172 @@ function applyAgentPatch(agent, patch) {
   if (patch.blinkUntil !== undefined) next.blinkUntil = patch.blinkUntil;
   next.updatedAt = patch.updatedAt || nowIso();
   return next;
+}
+
+function applyThreadPatch(thread, patch) {
+  const next = { ...thread };
+  if (patch.slot !== undefined) {
+    next.slot = patch.slot === null || patch.slot === "" ? null : normalizeSlot(patch.slot);
+  }
+  if (patch.label !== undefined) next.label = String(patch.label || "").trim();
+  if (patch.status !== undefined) {
+    const status = normalizeStatus(String(patch.status));
+    next.status = status;
+    if (status === "running") {
+      next.startedAt = patch.startedAt || thread.startedAt || nowIso();
+      next.finishedAt = null;
+      next.heartbeatAt = patch.heartbeatAt || nowIso();
+      if (patch.exitCode === undefined) {
+        next.exitCode = null;
+      }
+    } else if (status === "done" || status === "error") {
+      next.finishedAt = patch.finishedAt || nowIso();
+      if (patch.heartbeatAt !== undefined) {
+        next.heartbeatAt = patch.heartbeatAt;
+      }
+    } else if (patch.heartbeatAt !== undefined) {
+      next.heartbeatAt = patch.heartbeatAt;
+    }
+  } else if (patch.heartbeatAt !== undefined) {
+    next.heartbeatAt = patch.heartbeatAt;
+  }
+  if (patch.detail !== undefined) next.detail = String(patch.detail || "").trim();
+  if (patch.startedAt !== undefined) next.startedAt = patch.startedAt;
+  if (patch.finishedAt !== undefined) next.finishedAt = patch.finishedAt;
+  if (patch.exitCode !== undefined) {
+    next.exitCode = patch.exitCode === null || patch.exitCode === "" ? null : Number(patch.exitCode);
+  }
+  if (patch.source !== undefined) next.source = String(patch.source || next.source || "codex-app");
+  next.updatedAt = patch.updatedAt || nowIso();
+  return next;
+}
+
+function compareThreadFreshness(left, right) {
+  const leftMs = Date.parse(left.updatedAt || left.heartbeatAt || left.startedAt || nowIso());
+  const rightMs = Date.parse(right.updatedAt || right.heartbeatAt || right.startedAt || nowIso());
+  return rightMs - leftMs;
+}
+
+function selectThreadToRecycle(threads, excludedThreadId) {
+  const candidates = threads.filter(thread => thread.threadId !== excludedThreadId && thread.slot !== null);
+  if (!candidates.length) {
+    return null;
+  }
+  const priority = { done: 0, error: 1, running: 2, needs_input: 3 };
+  return candidates.sort((left, right) => {
+    const leftPriority = priority[left.status] ?? 99;
+    const rightPriority = priority[right.status] ?? 99;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+    return Date.parse(left.updatedAt || left.startedAt || nowIso()) - Date.parse(right.updatedAt || right.startedAt || nowIso());
+  })[0];
+}
+
+function assignThreadSlot(threads, threadId, requestedSlot) {
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const existing = threads.find(thread => thread.threadId === normalizedThreadId);
+  const usedSlots = new Set(
+    threads
+      .filter(thread => thread.threadId !== normalizedThreadId && thread.slot !== null)
+      .map(thread => thread.slot)
+  );
+
+  if (requestedSlot !== undefined && requestedSlot !== null && requestedSlot !== "") {
+    const preferred = normalizeSlot(requestedSlot);
+    if (!usedSlots.has(preferred) || existing?.slot === preferred) {
+      return preferred;
+    }
+  }
+
+  if (existing?.slot !== null && existing?.slot !== undefined) {
+    return existing.slot;
+  }
+
+  for (let slot = 1; slot <= 4; slot += 1) {
+    if (!usedSlots.has(slot)) {
+      return slot;
+    }
+  }
+
+  const recycled = selectThreadToRecycle(threads, normalizedThreadId);
+  if (!recycled || recycled.slot === null) {
+    return 1;
+  }
+  const recycledSlot = recycled.slot;
+  recycled.slot = null;
+  return recycledSlot;
+}
+
+function normalizeExplicitThreads(threads) {
+  const now = Date.now();
+  return threads
+    .map(thread => {
+      const next = { ...thread };
+      if (next.status === "running") {
+        const heartbeatMs = Date.parse(next.heartbeatAt || next.updatedAt || "");
+        if (!Number.isNaN(heartbeatMs) && now - heartbeatMs > THREAD_HEARTBEAT_TIMEOUT_MS) {
+          next.status = "error";
+          next.detail = "Signal verloren";
+          next.finishedAt = next.finishedAt || nowIso();
+          next.exitCode = next.exitCode ?? 1;
+          next.heartbeatAt = null;
+          next.updatedAt = nowIso();
+        }
+      }
+      return next;
+    })
+    .filter(thread => {
+      const referenceMs = Date.parse(
+        thread.finishedAt || thread.heartbeatAt || thread.updatedAt || thread.startedAt || nowIso()
+      );
+      if (Number.isNaN(referenceMs)) {
+        return true;
+      }
+      if (thread.status === "done" || thread.status === "error") {
+        return now - referenceMs <= THREAD_DONE_TTL_MS;
+      }
+      if (thread.status === "needs_input") {
+        return now - referenceMs <= THREAD_NEEDS_INPUT_TTL_MS;
+      }
+      return true;
+    })
+    .sort(compareThreadFreshness);
+}
+
+function threadToSlotState(thread, threadNames) {
+  return {
+    slot: thread.slot,
+    label: thread.label || String(threadNames[thread.threadId] || "").trim() || `Chat ${thread.slot}`,
+    status: thread.status,
+    detail: thread.detail || (thread.status === "running" ? "Aktiver Thread" : "Thread aktiv"),
+    updatedAt: thread.updatedAt,
+    startedAt: thread.startedAt,
+    threadOrTaskId: thread.threadId,
+    exitCode: thread.exitCode,
+    pid: null,
+    heartbeatAt: thread.heartbeatAt,
+    autodetected: false,
+    source: thread.source || "codex-app"
+  };
+}
+
+function overlayExplicitThreads(slots, threadSlots) {
+  const bySlot = new Map(threadSlots.map(thread => [thread.slot, thread]));
+  return slots.map(slot => {
+    if (slot.status !== "idle") {
+      return slot;
+    }
+    const thread = bySlot.get(slot.slot);
+    if (!thread) {
+      return slot;
+    }
+    return {
+      ...slot,
+      ...thread,
+      slot: slot.slot
+    };
+  });
 }
 
 function withHeartbeatTimeout(slots) {
@@ -650,8 +899,16 @@ async function loadEffectiveSlots() {
     await writeSlots(cleanedSlots);
   }
 
-  const discoveredConversations = await discoverCodexConversations();
-  const withConversations = overlayDiscoveredConversations(cleanedSlots, discoveredConversations);
+  const threadNames = await readThreadNames();
+  const explicitThreads = await loadExplicitThreads();
+  const explicitThreadSlots = explicitThreads
+    .filter(thread => thread.slot !== null)
+    .map(thread => threadToSlotState(thread, threadNames))
+    .sort((left, right) => left.slot - right.slot);
+  const withExplicitThreads = overlayExplicitThreads(cleanedSlots, explicitThreadSlots);
+  const shouldUseCodexFallback = ENABLE_CODEX_LOG_AUTODETECT && explicitThreadSlots.length === 0;
+  const discoveredConversations = shouldUseCodexFallback ? await discoverCodexConversations() : [];
+  const withConversations = overlayDiscoveredConversations(withExplicitThreads, discoveredConversations);
   if (!ENABLE_PROCESS_AUTODETECT) {
     return withConversations;
   }
@@ -929,12 +1186,18 @@ async function updateAgent(agentName, patch) {
   return agents[index];
 }
 
-async function setThreadName(threadId, label) {
-  const threadNames = await readThreadNames();
-  const normalizedThreadId = String(threadId || "").trim();
-  if (!normalizedThreadId) {
-    throw new Error("thread id is required");
+async function loadExplicitThreads() {
+  const storedThreads = await readThreads();
+  const normalizedThreads = normalizeExplicitThreads(storedThreads);
+  if (JSON.stringify(normalizedThreads) !== JSON.stringify(storedThreads)) {
+    await writeThreads(normalizedThreads);
   }
+  return normalizedThreads;
+}
+
+async function rememberThreadLabel(threadId, label) {
+  const threadNames = await readThreadNames();
+  const normalizedThreadId = normalizeThreadId(threadId);
   const normalizedLabel = String(label || "").trim();
   if (!normalizedLabel) {
     delete threadNames[normalizedThreadId];
@@ -942,9 +1205,70 @@ async function setThreadName(threadId, label) {
     threadNames[normalizedThreadId] = normalizedLabel;
   }
   await writeThreadNames(threadNames);
+  return normalizedLabel;
+}
+
+async function clearThread(threadId) {
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const threads = await readThreads();
+  const remaining = threads.filter(thread => thread.threadId !== normalizedThreadId);
+  await writeThreads(normalizeExplicitThreads(remaining));
+  return {
+    threadId: normalizedThreadId,
+    cleared: true
+  };
+}
+
+async function updateThread(threadId, patch = {}) {
+  const normalizedThreadId = normalizeThreadId(threadId);
+  if (patch.clear) {
+    return clearThread(normalizedThreadId);
+  }
+
+  const threads = await readThreads();
+  const index = threads.findIndex(thread => thread.threadId === normalizedThreadId);
+  const current = index >= 0 ? threads[index] : createDefaultThread(normalizedThreadId);
+  const assignedSlot =
+    patch.slot !== undefined
+      ? assignThreadSlot(threads, normalizedThreadId, patch.slot)
+      : assignThreadSlot(threads, normalizedThreadId, current.slot);
+  const next = applyThreadPatch(
+    {
+      ...current,
+      threadId: normalizedThreadId,
+      slot: assignedSlot
+    },
+    {
+      ...patch,
+      slot: assignedSlot,
+      source: patch.source || current.source || "codex-app"
+    }
+  );
+
+  if (index >= 0) {
+    threads[index] = next;
+  } else {
+    threads.push(next);
+  }
+
+  if (patch.label !== undefined) {
+    await rememberThreadLabel(normalizedThreadId, patch.label);
+  }
+
+  const normalizedThreads = normalizeExplicitThreads(threads);
+  await writeThreads(normalizedThreads);
+  return normalizedThreads.find(thread => thread.threadId === normalizedThreadId) || next;
+}
+
+async function setThreadName(threadId, label) {
+  const normalizedThreadId = String(threadId || "").trim();
+  if (!normalizedThreadId) {
+    throw new Error("thread id is required");
+  }
+  const normalizedLabel = await rememberThreadLabel(normalizedThreadId, label);
   return {
     threadOrTaskId: normalizedThreadId,
-    label: threadNames[normalizedThreadId] || ""
+    label: normalizedLabel
   };
 }
 
@@ -987,6 +1311,7 @@ Commands:
   serve
   init
   list
+  threads
   state
   clear --slot <1-4>
   set-status --slot <1-4> --status <idle|running|needs_input|error|done> [--label "..."] [--detail "..."] [--thread "..."] [--exit-code 0]
@@ -994,6 +1319,9 @@ Commands:
   heartbeat-agent --agent <noah|carmen> [--status <online|attention>] [--detail "..."] [--activity true]
   pulse-agent --agent <noah|carmen> [--status <online|attention>] [--detail "..."]
   set-thread-name --thread <conversation-id> --label "Kurzname"
+  set-thread --thread <conversation-id> [--status <running|needs_input|error|done>] [--label "..."] [--detail "..."] [--slot <1-4>] [--exit-code 1]
+  heartbeat-thread --thread <conversation-id> [--label "..."] [--detail "..."] [--slot <1-4>]
+  clear-thread --thread <conversation-id>
   heartbeat --slot <1-4>
   start --slot <1-4> --label "Build" --command "npm run build"
 
@@ -1002,8 +1330,11 @@ API:
   GET  /state
   GET  /slots
   GET  /agents
+  GET  /threads
   POST /slots/:slot
   POST /agents/:name
+  POST /threads/:threadId
+  POST /threads/:threadId/heartbeat
 `);
 }
 
@@ -1083,12 +1414,12 @@ async function serve() {
       const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
 
       if (req.method === "GET" && url.pathname === "/health") {
-        sendJson(res, 200, { ok: true, port: PORT, dataFile: DATA_FILE });
+        sendJson(res, 200, { ok: true, port: PORT, dataFile: DATA_FILE, threadsFile: THREADS_FILE });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/state") {
-        sendJson(res, 200, { slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents() });
+        sendJson(res, 200, { slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents(), threads: await loadExplicitThreads() });
         return;
       }
 
@@ -1099,6 +1430,11 @@ async function serve() {
 
       if (req.method === "GET" && url.pathname === "/agents") {
         sendJson(res, 200, await loadEffectiveAgents());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/threads") {
+        sendJson(res, 200, await loadExplicitThreads());
         return;
       }
 
@@ -1146,10 +1482,44 @@ async function serve() {
         return;
       }
 
-      const threadMatch = url.pathname.match(/^\/threads\/([0-9a-f-]+)$/);
+      const threadHeartbeatMatch = url.pathname.match(/^\/threads\/([^/]+)\/heartbeat$/);
+      if (req.method === "POST" && threadHeartbeatMatch) {
+        const body = await parseBody(req);
+        const updated = await updateThread(decodeURIComponent(threadHeartbeatMatch[1]), {
+          label: body.label,
+          detail: body.detail,
+          slot: body.slot,
+          status: body.status ?? "running",
+          startedAt: body.startedAt ?? undefined,
+          heartbeatAt: nowIso(),
+          source: body.source || "codex-app"
+        });
+        sendJson(res, 200, updated);
+        return;
+      }
+
+      const threadMatch = url.pathname.match(/^\/threads\/([^/]+)$/);
       if (req.method === "POST" && threadMatch) {
         const body = await parseBody(req);
-        const updated = await setThreadName(threadMatch[1], body.label);
+        const updated = await updateThread(decodeURIComponent(threadMatch[1]), {
+          label: body.label,
+          status: body.status,
+          detail: body.detail,
+          slot: body.slot,
+          startedAt:
+            body.status === "running" && body.startedAt !== null ? body.startedAt ?? nowIso() : body.startedAt ?? undefined,
+          heartbeatAt:
+            body.heartbeat === true || body.status === "running"
+              ? nowIso()
+              : body.heartbeatAt ?? undefined,
+          finishedAt:
+            body.status === "done" || body.status === "error"
+              ? body.finishedAt ?? nowIso()
+              : body.finishedAt ?? undefined,
+          exitCode: body.exitCode,
+          source: body.source || "codex-app",
+          clear: body.clear === true
+        });
         sendJson(res, 200, updated);
         return;
       }
@@ -1181,8 +1551,11 @@ async function main() {
     case "list":
       console.log(JSON.stringify(await loadEffectiveSlots(), null, 2));
       return;
+    case "threads":
+      console.log(JSON.stringify(await loadExplicitThreads(), null, 2));
+      return;
     case "state":
-      console.log(JSON.stringify({ slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents() }, null, 2));
+      console.log(JSON.stringify({ slots: await loadEffectiveSlots(), agents: await loadEffectiveAgents(), threads: await loadExplicitThreads() }, null, 2));
       return;
     case "clear": {
       const slot = normalizeSlot(args.slot);
@@ -1266,6 +1639,48 @@ async function main() {
     }
     case "set-thread-name": {
       console.log(JSON.stringify(await setThreadName(args.thread, args.label), null, 2));
+      return;
+    }
+    case "set-thread": {
+      const status = args.status !== undefined ? normalizeStatus(String(args.status)) : undefined;
+      console.log(
+        JSON.stringify(
+          await updateThread(args.thread, {
+            label: args.label,
+            status,
+            detail: args.detail,
+            slot: args.slot,
+            startedAt: status === "running" ? nowIso() : undefined,
+            heartbeatAt: status === "running" ? nowIso() : undefined,
+            finishedAt: status === "done" || status === "error" ? nowIso() : undefined,
+            exitCode: args["exit-code"],
+            source: "codex-app"
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    case "heartbeat-thread": {
+      console.log(
+        JSON.stringify(
+          await updateThread(args.thread, {
+            label: args.label,
+            detail: args.detail,
+            slot: args.slot,
+            status: "running",
+            heartbeatAt: nowIso(),
+            source: "codex-app"
+          }),
+          null,
+          2
+        )
+      );
+      return;
+    }
+    case "clear-thread": {
+      console.log(JSON.stringify(await clearThread(args.thread), null, 2));
       return;
     }
     case "start":
