@@ -27,21 +27,63 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
-const AGENT_REMOTE_DEFAULTS = {
-  noah: {
-    kind: "ssh-json",
-    host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || "ocvps",
-    command:
-      process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND ||
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
-  },
-  carmen: {
-    kind: "ssh-json",
-    host: process.env.CODEX_MONITOR_CARMEN_SSH_HOST || "carmen-vps",
-    command:
-      process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND ||
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
+function parseOptionalNumber(value, fallback = undefined) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function buildAgentRemoteHeaders(prefix) {
+  const headers = {};
+  const bearerToken = process.env[`${prefix}_STATUS_BEARER_TOKEN`];
+  if (bearerToken) {
+    headers.Authorization = `Bearer ${bearerToken}`;
   }
+  const headerName = process.env[`${prefix}_STATUS_HEADER_NAME`];
+  const headerValue = process.env[`${prefix}_STATUS_HEADER_VALUE`];
+  if (headerName && headerValue) {
+    headers[headerName] = headerValue;
+  }
+  return headers;
+}
+
+function createAgentRemoteConfig(prefix, sshHostEnv, defaultHost, commandEnv, defaultCommand) {
+  const statusUrl = process.env[`${prefix}_STATUS_URL`];
+  if (statusUrl) {
+    return {
+      kind: "http-json",
+      url: statusUrl,
+      headers: buildAgentRemoteHeaders(prefix),
+      timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 4_000)
+    };
+  }
+
+  return {
+    kind: "ssh-json",
+    host: process.env[sshHostEnv] || defaultHost,
+    command: process.env[commandEnv] || defaultCommand,
+    timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 8_000)
+  };
+}
+
+const AGENT_REMOTE_DEFAULTS = {
+  noah: createAgentRemoteConfig(
+    "CODEX_MONITOR_NOAH",
+    "CODEX_MONITOR_NOAH_SSH_HOST",
+    "ocvps",
+    "CODEX_MONITOR_NOAH_STATUS_COMMAND",
+    (
+      "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
+    )
+  ),
+  carmen: createAgentRemoteConfig(
+    "CODEX_MONITOR_CARMEN",
+    "CODEX_MONITOR_CARMEN_SSH_HOST",
+    "carmen-vps",
+    "CODEX_MONITOR_CARMEN_STATUS_COMMAND",
+    (
+      "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
+    )
+  )
 };
 const agentProbeCache = new Map();
 const agentProbeInflight = new Map();
@@ -51,7 +93,7 @@ const noahMonitorCache = {
 };
 let noahMonitorInflight = null;
 const NOAH_MONITOR_DEFAULTS = {
-  host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || AGENT_REMOTE_DEFAULTS.noah.host,
+  host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || (AGENT_REMOTE_DEFAULTS.noah.kind === "ssh-json" ? AGENT_REMOTE_DEFAULTS.noah.host : "ocvps"),
   command:
     process.env.CODEX_MONITOR_NOAH_MONITOR_COMMAND ||
     String.raw`python3 - <<'PY'
@@ -905,10 +947,11 @@ function futureIso(offsetMs) {
   return new Date(Date.now() + offsetMs).toISOString();
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
+  const headers = { Accept: "application/json", ...(options.headers || {}) };
   const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(4_000)
+    headers,
+    signal: AbortSignal.timeout(options.timeoutMs || 4_000)
   });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -928,6 +971,16 @@ async function runSshJson(host, command, timeout = 8_000) {
   );
   const output = String(stdout || "").trim();
   return output ? JSON.parse(output) : {};
+}
+
+async function runRemoteProbe(config) {
+  if (config?.kind === "http-json") {
+    return fetchJson(config.url, {
+      headers: config.headers,
+      timeoutMs: config.timeoutMs
+    });
+  }
+  return runSshJson(config.host, config.command, config.timeoutMs);
 }
 
 function makeProbeResult(status, detail, extra = {}) {
@@ -955,9 +1008,177 @@ function isRecentIsoTimestamp(value, thresholdMs = AGENT_ACTIVITY_WINDOW_MS) {
   return Date.now() - timestamp <= thresholdMs;
 }
 
+function getValueAtPath(payload, pathExpression) {
+  return String(pathExpression)
+    .split(".")
+    .reduce((current, key) => (current && typeof current === "object" ? current[key] : undefined), payload);
+}
+
+function firstPresentValue(payload, paths) {
+  for (const pathExpression of paths) {
+    const value = getValueAtPath(payload, pathExpression);
+    if (value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function firstFiniteNumber(payload, paths) {
+  for (const pathExpression of paths) {
+    const value = firstPresentValue(payload, [pathExpression]);
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function firstBooleanValue(payload, paths) {
+  for (const pathExpression of paths) {
+    const value = firstPresentValue(payload, [pathExpression]);
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "string" || typeof value === "number") {
+      return parseBooleanFlag(value, undefined);
+    }
+  }
+  return undefined;
+}
+
+function firstStringValue(payload, paths) {
+  const value = firstPresentValue(payload, paths);
+  return value !== undefined ? String(value) : undefined;
+}
+
+function formatTokenCount(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "";
+  }
+  if (amount >= 1_000_000) {
+    return `${(amount / 1_000_000).toFixed(1)}M`;
+  }
+  if (amount >= 1_000) {
+    return `${(amount / 1_000).toFixed(1)}k`;
+  }
+  return String(Math.round(amount));
+}
+
+function deriveOpenAiActivity(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const totalTokens = firstFiniteNumber(payload, [
+    "activity.totalTokens",
+    "openai.totalTokens",
+    "openai.tokens.total",
+    "openai.usage.total_tokens",
+    "usage.total_tokens",
+    "tokens.total"
+  ]);
+  const windowTokens = firstFiniteNumber(payload, [
+    "activity.windowTokens",
+    "openai.windowTokens",
+    "openai.window.tokens",
+    "openai.window.total_tokens",
+    "usage.window.total_tokens",
+    "tokens.window.total"
+  ]);
+  const windowMinutes = firstFiniteNumber(payload, [
+    "activity.windowMinutes",
+    "openai.windowMinutes",
+    "openai.window.minutes",
+    "usage.window.minutes",
+    "tokens.window.minutes"
+  ]) || 5;
+  const lastActivityAt = firstStringValue(payload, [
+    "activity.lastActivityAt",
+    "openai.lastActivityAt",
+    "openai.last_activity_at",
+    "usage.last_activity_at",
+    "lastActivityAt"
+  ]);
+  const recentActivity = firstBooleanValue(payload, [
+    "recentActivity",
+    "activity.recentActivity",
+    "openai.recentActivity"
+  ]);
+  const activityMetric =
+    firstStringValue(payload, ["activityMetric", "activity.metric", "openai.activityMetric"]) ||
+    (Number.isFinite(totalTokens)
+      ? `tokens:${Math.trunc(totalTokens)}`
+      : Number.isFinite(windowTokens)
+        ? `window:${Math.trunc(windowTokens)}:${lastActivityAt || ""}`
+        : lastActivityAt
+          ? `activity:${lastActivityAt}`
+          : undefined);
+  const detail =
+    firstStringValue(payload, ["detail", "activity.detail", "openai.detail"]) ||
+    (Number.isFinite(windowTokens) && windowTokens > 0
+      ? `OpenAI ${formatTokenCount(windowTokens)} Tok/${windowMinutes}m`
+      : Number.isFinite(totalTokens)
+        ? `OpenAI ${formatTokenCount(totalTokens)} Tok ges.`
+        : undefined);
+
+  if (!detail && recentActivity === undefined && activityMetric === undefined) {
+    return null;
+  }
+
+  return {
+    detail,
+    recentActivity:
+      recentActivity !== undefined
+        ? recentActivity
+        : Number.isFinite(windowTokens)
+          ? windowTokens > 0
+          : lastActivityAt
+            ? isRecentIsoTimestamp(lastActivityAt, AGENT_ACTIVITY_WINDOW_MS)
+            : undefined,
+    activityMetric,
+    allowRemoteActivity: true
+  };
+}
+
+function makeExplicitProbeResult(payload, fallbackStatus, fallbackDetail) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const explicitStatus = payload.status !== undefined ? normalizeAgentStatus(payload.status) : fallbackStatus;
+  const explicitDetail = firstStringValue(payload, ["detail"]);
+  const explicitRecentActivity = firstBooleanValue(payload, ["recentActivity"]);
+  const explicitActivityMetric = firstStringValue(payload, ["activityMetric"]);
+  const openAiActivity = deriveOpenAiActivity(payload);
+
+  const hasExplicitSignal =
+    payload.status !== undefined ||
+    explicitDetail !== undefined ||
+    explicitRecentActivity !== undefined ||
+    explicitActivityMetric !== undefined ||
+    Boolean(openAiActivity);
+
+  if (!hasExplicitSignal) {
+    return null;
+  }
+
+  return makeProbeResult(explicitStatus, explicitDetail || openAiActivity?.detail || fallbackDetail, {
+    recentActivity: explicitRecentActivity ?? openAiActivity?.recentActivity,
+    activityMetric: explicitActivityMetric || openAiActivity?.activityMetric,
+    allowRemoteActivity: openAiActivity?.allowRemoteActivity || explicitRecentActivity !== undefined || explicitActivityMetric !== undefined
+  });
+}
+
 async function probeNoahRemote() {
   try {
-    const payload = await runSshJson(AGENT_REMOTE_DEFAULTS.noah.host, AGENT_REMOTE_DEFAULTS.noah.command);
+    const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.noah);
+    const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
+    if (explicit) {
+      return explicit;
+    }
     const paperCycleMtime = payload?.paper_cycle?.mtime;
     const mainBundleMtime = payload?.main_bundle?.mtime;
     const companionLogMtime = payload?.companion_log?.mtime;
@@ -985,7 +1206,11 @@ async function probeNoahRemote() {
 
 async function probeCarmenRemote() {
   try {
-    const payload = await runSshJson(AGENT_REMOTE_DEFAULTS.carmen.host, AGENT_REMOTE_DEFAULTS.carmen.command);
+    const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.carmen);
+    const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
+    if (explicit) {
+      return explicit;
+    }
     const receiverOk = Boolean(payload?.receiver?.ok);
     const nodeReady = Boolean(payload?.node?.ready);
     const nodeAuthenticated = Boolean(payload?.node?.authenticated);
@@ -1078,13 +1303,14 @@ async function overlayRemoteAgentStates(agents) {
       heartbeatAge <= AGENT_HEARTBEAT_TIMEOUT_MS &&
       (agent.activity || agent.status === "attention");
     const previous = agentProbeCache.get(agent.name)?.previousResult;
+    const remoteActivityEnabled = probe.allowRemoteActivity || ENABLE_REMOTE_AGENT_ACTIVITY;
     const changedActivityMetric =
-      ENABLE_REMOTE_AGENT_ACTIVITY &&
+      remoteActivityEnabled &&
       probe.activityMetric !== undefined &&
       previous?.activityMetric !== undefined &&
       probe.activityMetric !== previous.activityMetric;
     const shouldBlink =
-      ENABLE_REMOTE_AGENT_ACTIVITY &&
+      remoteActivityEnabled &&
       Boolean(probe.recentActivity || changedActivityMetric);
 
     if (hasRecentExplicitSignal) {

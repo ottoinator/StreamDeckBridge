@@ -169,6 +169,7 @@ Hinweis:
 - `attention`: gelb blinkend
 - `offline`: rot
 - Remote-Probes setzen standardmaessig nur noch Verfuegbarkeit. Fuer echtes "arbeitet gerade" nutze bewusst `heartbeat-agent --activity true` oder `POST /agents/:name` mit `"activity": true`.
+- Fuer explizite OpenAI- oder Aktivitaetsdaten aus einem Remote-JSON-Endpunkt kann die Bridge jetzt direkt blinken, ohne das alte Dateisystem-Fallback zu aktivieren.
 - Falls du das alte, aus Remote-Dateiaktivitaet abgeleitete Blinken trotzdem willst, setze `CODEX_MONITOR_REMOTE_AGENT_ACTIVITY=1`.
 
 Noah auf online:
@@ -193,6 +194,68 @@ Agent auf offline:
 
 ```powershell
 node .\bridge\monitor-bridge.mjs set-agent --agent noah --status offline --detail "Nicht verfuegbar"
+```
+
+### Tokenbasierte Agenten-Aktivitaet
+
+Fuer Noah und Carmen kann die Bridge optional statt SSH einen schlanken HTTP-JSON-Endpunkt auf dem jeweiligen VPS abfragen:
+
+- `CODEX_MONITOR_NOAH_STATUS_URL`
+- `CODEX_MONITOR_CARMEN_STATUS_URL`
+
+Optional:
+
+- `CODEX_MONITOR_<AGENT>_STATUS_BEARER_TOKEN`
+- `CODEX_MONITOR_<AGENT>_STATUS_HEADER_NAME`
+- `CODEX_MONITOR_<AGENT>_STATUS_HEADER_VALUE`
+- `CODEX_MONITOR_<AGENT>_STATUS_TIMEOUT_MS`
+
+Kleinstes sinnvolles JSON:
+
+```json
+{
+  "status": "online",
+  "detail": "OpenAI 4.8k Tok/5m",
+  "recentActivity": true,
+  "activityMetric": "tokens:184220"
+}
+```
+
+Alternativ reicht auch:
+
+```json
+{
+  "status": "online",
+  "openai": {
+    "totalTokens": 184220,
+    "windowTokens": 4820,
+    "windowMinutes": 5,
+    "lastActivityAt": "2026-03-30T10:55:12Z"
+  }
+}
+```
+
+Die Bridge erkennt daraus echte OpenAI-Aktivitaet und laesst die Leuchte blinken, wenn Tokenverbrauch steigt oder juengste Aktivitaet gemeldet wird.
+
+In den zugehoerigen Agenten-Repos sind jetzt bereits konkrete Endpunkte vorgesehen:
+
+- Noah:
+  - `http://<host>:8765/api/v1/status/openai-activity`
+  - Auth: `NOAH_COMPANION_API_TOKEN`
+- Carmen:
+  - `http://<host>:4319/status/openai-activity`
+  - Auth: `CARMEN_WHATSAPP_PUSH_TOKEN`
+
+Eine kleine Referenz fuer so einen VPS-Endpunkt liegt hier:
+
+```text
+scripts/openai-activity-endpoint.py
+```
+
+Mehr Details und die empfohlene Architektur:
+
+```text
+docs/openai-agent-activity.md
 ```
 
 ## Noah-Monitor-Kacheln
