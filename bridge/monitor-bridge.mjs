@@ -1238,8 +1238,9 @@ function buildNoahTiles(summary) {
           ? "error"
           : "idle";
   const usSession = String(us.session_state || "offline").toUpperCase();
+  const usTradingActive = Boolean(us.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession);
   const usStatus =
-    us.market_open || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession)
+    usTradingActive
       ? "ok"
       : us.health === "INTERVENTION_REQUIRED"
         ? "error"
@@ -1253,7 +1254,7 @@ function buildNoahTiles(summary) {
         : xetra.session_window || "--:--";
 
   const usFooter =
-    us.market_open || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession)
+    usTradingActive
       ? formatCountdown(us.next_cycle_at)
       : formatCountdown(us.next_market_open_berlin);
 
@@ -1293,10 +1294,10 @@ function buildNoahTiles(summary) {
     us_cycle: {
       key: "us_cycle",
       label: "US Zyklus",
-      status: usStatus,
-      line1: `Letz ${formatBerlinTime(us.last_cycle_at)}`,
-      line2: `T${Number(us.roundtrip_count || 0)} I${Number(us.trade_ideas_count || 0)}`,
-      footer: formatCountdown(us.next_cycle_at),
+      status: usTradingActive ? usStatus : "idle",
+      line1: usTradingActive ? `Letz ${formatBerlinTime(us.last_cycle_at)}` : "Nicht aktiv",
+      line2: usTradingActive ? `T${Number(us.roundtrip_count || 0)} I${Number(us.trade_ideas_count || 0)}` : "Kein Zyklus",
+      footer: usTradingActive ? formatCountdown(us.next_cycle_at) : "--:--",
       updatedAt
     }
   };
