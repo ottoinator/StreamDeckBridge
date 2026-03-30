@@ -52,6 +52,10 @@ function Get-WatcherStatePath {
     return Join-Path (Get-WatcherDirectory) "$CurrentThreadId.json"
 }
 
+function Get-CodexSessionsRoot {
+    return Join-Path $HOME ".codex\\sessions"
+}
+
 function Invoke-WithRetry {
     param(
         [scriptblock]$ScriptBlock,
@@ -72,6 +76,82 @@ function Invoke-WithRetry {
     }
     if ($null -ne $lastError) {
         throw $lastError
+    }
+}
+
+function Find-CodexSessionLog {
+    param([string]$CurrentThreadId)
+    $sessionsRoot = Get-CodexSessionsRoot
+    if (-not (Test-Path -LiteralPath $sessionsRoot)) {
+        return $null
+    }
+    try {
+        return Get-ChildItem -Path $sessionsRoot -Recurse -File -Filter "*$CurrentThreadId.jsonl" -ErrorAction Stop |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+    } catch {
+        return $null
+    }
+}
+
+function Get-CodexTurnState {
+    param([string]$SessionLogPath)
+    if ([string]::IsNullOrWhiteSpace($SessionLogPath) -or -not (Test-Path -LiteralPath $SessionLogPath)) {
+        return $null
+    }
+    try {
+        $lines = Invoke-WithRetry -ScriptBlock { Get-Content -LiteralPath $SessionLogPath -Tail 250 }
+    } catch {
+        return $null
+    }
+
+    $lastUserMessageAt = $null
+    $lastFinalAnswerAt = $null
+
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        try {
+            $entry = $line | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        try {
+            $entryTimestamp =
+                if ($entry.timestamp -is [DateTimeOffset]) {
+                    [DateTimeOffset]$entry.timestamp
+                } elseif ($entry.timestamp -is [DateTime]) {
+                    [DateTimeOffset]::new([DateTime]$entry.timestamp)
+                } else {
+                    [DateTimeOffset]::Parse([string]$entry.timestamp)
+                }
+        } catch {
+            continue
+        }
+
+        if ($entry.type -eq "event_msg" -and $entry.payload.type -eq "user_message") {
+            if ($null -eq $lastUserMessageAt -or $entryTimestamp -gt $lastUserMessageAt) {
+                $lastUserMessageAt = $entryTimestamp
+            }
+            continue
+        }
+
+        if (
+            $entry.type -eq "response_item" -and
+            $entry.payload.type -eq "message" -and
+            $entry.payload.role -eq "assistant" -and
+            $entry.payload.phase -eq "final_answer"
+        ) {
+            if ($null -eq $lastFinalAnswerAt -or $entryTimestamp -gt $lastFinalAnswerAt) {
+                $lastFinalAnswerAt = $entryTimestamp
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        lastUserMessageAt = $lastUserMessageAt
+        lastFinalAnswerAt = $lastFinalAnswerAt
     }
 }
 
@@ -252,10 +332,39 @@ function Invoke-WatchLoop {
         [int]$CurrentIdleDoneSeconds
     )
     $threadUri = Get-ThreadUri -BaseUrl $CurrentBridgeUrl -CurrentThreadId $CurrentThreadId
+    $sessionLogPath = $null
     while ($true) {
         $state = Read-WatcherState -CurrentThreadId $CurrentThreadId
         if ($null -eq $state) {
             break
+        }
+        if ([string]::IsNullOrWhiteSpace($sessionLogPath) -or -not (Test-Path -LiteralPath $sessionLogPath)) {
+            $sessionLogPath = Find-CodexSessionLog -CurrentThreadId $CurrentThreadId
+        }
+        if (-not [string]::IsNullOrWhiteSpace($sessionLogPath)) {
+            $turnState = Get-CodexTurnState -SessionLogPath $sessionLogPath
+            if (
+                $null -ne $turnState -and
+                $null -ne $turnState.lastFinalAnswerAt -and
+                ($null -eq $turnState.lastUserMessageAt -or $turnState.lastFinalAnswerAt -gt $turnState.lastUserMessageAt)
+            ) {
+                $donePayload = @{
+                    status = "done"
+                    exitCode = 0
+                    source = "codex-app"
+                    label = if ([string]::IsNullOrWhiteSpace([string]$state.label)) { Get-DefaultLabel } else { [string]$state.label }
+                    detail = "Antwort gesendet"
+                }
+                if ($state.slot) {
+                    $donePayload.slot = [int]$state.slot
+                }
+                try {
+                    Invoke-BridgePost -Uri $threadUri -Body $donePayload | Out-Null
+                } catch {
+                }
+                Remove-WatcherState -CurrentThreadId $CurrentThreadId
+                break
+            }
         }
         $idleDoneToUse = if ($null -ne $state.idleDoneSeconds -and [int]$state.idleDoneSeconds -gt 0) { [int]$state.idleDoneSeconds } else { $CurrentIdleDoneSeconds }
         $lastActivityAt = if ($null -ne $state.lastActivityAt) { [string]$state.lastActivityAt } else { "" }
@@ -293,7 +402,7 @@ function Invoke-WatchLoop {
             Invoke-BridgePost -Uri "$threadUri/heartbeat" -Body $payload | Out-Null
         } catch {
         }
-        Start-Sleep -Seconds ([Math]::Max(5, $CurrentIntervalSeconds))
+        Start-Sleep -Seconds ([Math]::Max(1, [Math]::Min(5, $CurrentIntervalSeconds)))
     }
 }
 
