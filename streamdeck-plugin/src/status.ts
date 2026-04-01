@@ -99,7 +99,7 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
 
 export function defaultNoahTile(key: NoahTileKey): NoahTileState {
   const labels: Record<NoahTileKey, string> = {
-    xetra_status: "Xetra Smoke",
+    xetra_status: "Xetra",
     xetra_cycle: "Xetra Zyklus",
     us_status: "US Handel",
     us_cycle: "US Zyklus"
@@ -387,15 +387,19 @@ export function agentSvg(agent: AgentState): string {
 
 export function noahTileSvg(tile: NoahTileState): string {
   const meta = NOAH_TILE_META[tile.status];
-  const titleLines = wrapText(tile.label, 10, 2);
-  const line1 = wrapText(tile.line1 || meta.title, 12, 1);
-  const line2 = wrapText(tile.line2 || "", 12, 2);
+  const titleLines = wrapText(tile.label, 12, 2);
+  const line1 = wrapText(tile.line1 || meta.title, 11, 1);
+  const line2 = wrapText(tile.line2 || "", 11, 1);
+  const footerLines = wrapText(tile.footer || meta.title, 12, 1);
 
   const titleSvg = titleLines
-    .map((line, index) => `<text x="8" y="${14 + index * 10}" font-size="9" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
+    .map((line, index) => `<text x="8" y="${13 + index * 9}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
-  const detailSvg = [...line1, ...line2]
-    .map((line, index) => `<text x="8" y="${38 + index * 9}" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
+  const detailSvg = [line1[0] || "", line2[0] || ""]
+    .map((line, index) => `<text x="8" y="${35 + index * 14}" font-size="12" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
+    .join("");
+  const footerSvg = footerLines
+    .map((line, index) => `<text x="8" y="${63 - index * 8}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
@@ -403,9 +407,9 @@ export function noahTileSvg(tile: NoahTileState): string {
       <rect width="72" height="72" rx="12" fill="${meta.color}" />
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.07)" />
       <circle cx="58" cy="14" r="6" fill="${meta.dot}" />
-      <text x="8" y="63" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(tile.footer || meta.title)}</text>
       ${titleSvg}
       ${detailSvg}
+      ${footerSvg}
     </svg>
   `)}`;
 }
