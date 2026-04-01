@@ -174,11 +174,13 @@ def xs():
     ps=r(bd/'paper_state.json') or {}; cy=jl(bd/'paper_cycle.log.jsonl') or {}
     return {'state':st.get('state') or a.get('state') or s.get('state') or l.get('state') or 'not_started','trade_day':st.get('trade_day') or a.get('trade_day') or s.get('trade_day') or l.get('trade_day'),'cycle_count':int(st.get('cycle_count') or 0),'roundtrip_count':int(st.get('roundtrip_count') or 0),'open_positions':opn((ps.get('policies') or (cy.get('policies') or {}))),'closed_positions':int(st.get('roundtrip_count') or 0),'latest_cycle_at':iso(lc),'next_cycle_at':iso(nc),'scheduled_start_at':iso(p(a.get('scheduled_start_berlin') or s.get('scheduled_start_berlin') or st.get('scheduled_start_berlin'))),'session_window':st.get('session_window'),'interval_sec':int(iv),'source':'registry'}
 def us(now,st,it,cy):
-    rows=(cy or {}).get('cycles') or []; lc=p((((st or {}).get('system_health') or {}).get('last_successful_cycle_ts_et')) or ((rows[-1] if rows else {}).get('ts_et'))); pc=p((rows[-2] if len(rows)>=2 else {}).get('ts_et')); iv=int((lc-pc).total_seconds()) if lc and pc else 600
+    rows=(cy or {}).get('cycles') or []; cr=((st or {}).get('cycle_runtime') or {}); lc=p((((st or {}).get('system_health') or {}).get('last_successful_cycle_ts_et')) or ((rows[-1] if rows else {}).get('ts_et'))); pc=p((rows[-2] if len(rows)>=2 else {}).get('ts_et')); iv=int((lc-pc).total_seconds()) if lc and pc else int((cr.get('cycle_interval_minutes') or 10)*60)
     if iv<=0: iv=600
+    nx=p(cr.get('next_cycle_ts_et'))
+    if not lc and nx: lc=nx-timedelta(seconds=iv)
     ss=(((st or {}).get('trading_posture') or {}).get('session_state') or {}); pm=((it or {}).get('current_policy_metrics') or {}); ts=((it or {}).get('decision_trail_summary') or {}); rt=len(ts.get('roundtrips') or [])
     mk=bool((it or {}).get('market_open')) or ss.get('code') in ('TRADEABLE','DEFENSIVE','CLOSE_ONLY')
-    return {'trade_day':(it or {}).get('trade_day') or (cy or {}).get('trade_day'),'market_open':mk,'session_state':ss.get('code'),'session_subtitle':ss.get('subtitle'),'headline':(((st or {}).get('human_status') or {}).get('headline')),'health':((((st or {}).get('system_health') or {}).get('status') or {}).get('code')),'last_cycle_at':iso(lc),'next_cycle_at':iso(lc+timedelta(seconds=iv) if lc else None),'cycle_interval_sec':iv,'roundtrip_count':rt,'open_positions':sump(pm,'open_positions'),'closed_positions':max(rt,sump(ts.get('policy_summary') or {},'positions_closed'),sump(pm,'exits_today')),'entries_today':sump(pm,'entries_today'),'trade_ideas_count':int((it or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(nxt(now))}
+    return {'trade_day':(it or {}).get('trade_day') or (cy or {}).get('trade_day'),'market_open':mk,'session_state':ss.get('code'),'session_subtitle':ss.get('subtitle'),'headline':(((st or {}).get('human_status') or {}).get('headline')),'health':((((st or {}).get('system_health') or {}).get('status') or {}).get('code')),'last_cycle_at':iso(lc),'next_cycle_at':iso(nx or (lc+timedelta(seconds=iv) if lc else None)),'cycle_interval_sec':iv,'roundtrip_count':rt,'open_positions':sump(pm,'open_positions'),'closed_positions':max(rt,sump(ts.get('policy_summary') or {},'positions_closed'),sump(pm,'exits_today')),'entries_today':sump(pm,'entries_today'),'trade_ideas_count':int((it or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(nxt(now))}
 def ti(v):
     try:return int(v or 0)
     except Exception:return 0
@@ -210,31 +212,29 @@ def split_dashboard(payload):
 def trade_counter(token):
     warnings={}
     counters={'xetra':None,'us':None}
-    dashboard, de = safe('/api/v1/view/dashboard-cards', token)
-    if de: warnings['dashboard_cards']=de
-    else:
-        mapped=split_dashboard(dashboard)
-        counters['xetra']=cnt(mapped.get('xetra'), 'dashboard') if mapped.get('xetra') else None
-        counters['us']=cnt(mapped.get('us'), 'dashboard') if mapped.get('us') else None
-    need_fallback = counters['xetra'] is None or counters['us'] is None
-    if need_fallback:
-        observer, oe = safe('/api/v1/view/observer-card', token)
-        if oe: warnings['observer_card']=oe
-        elif isinstance(observer, dict):
-            market=mkt(observer.get('active_market') or observer.get('market') or observer.get('market_id')) or ('xetra' if counters['xetra'] is None else 'us')
-            if counters.get(market) is None:
-                counters[market]=cnt(observer, 'observer')
+    for market in ('xetra','us'):
+        card, err = safe(f'/api/v1/view/observer-card?market={market}', token)
+        if err:
+            warnings[f'observer_card_{market}']=err
+        elif isinstance(card, dict):
+            counters[market]=cnt(card, f'observer_{market}')
     for market in ('xetra','us'):
         if counters[market] is None:
             counters[market]={'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}
     return counters,warnings
-t=tok(); now=datetime.now(timezone.utc); st,se=safe('/api/v1/status/current',t); it,ie=safe('/api/v1/intraday/today',t); cy,ce=safe('/api/v1/observer/cycles?limit=3',t); tc,tw=trade_counter(t)
-x=xs(); u=us(now,st,it,cy)
+t=tok(); now=datetime.now(timezone.utc); st,se=safe('/api/v1/status/current',t); it,ie=safe('/api/v1/intraday/today',t); cy,ce=safe('/api/v1/observer/cycles?limit=3',t)
+stx,sex=safe('/api/v1/status/current?market=xetra',t); itx,iex=safe('/api/v1/intraday/today?market=xetra',t); cyx,cex=safe('/api/v1/observer/cycles?market=xetra&limit=3',t)
+tc,tw=trade_counter(t)
+u=us(now,st,it,cy)
+x=us(now,stx,itx,cyx)
+if not (stx or itx or cyx):
+    x=xs()
+x['source']=x.get('source') or ('companion_xetra' if (stx or itx or cyx) else 'registry')
 x.update({'counter': tc.get('xetra') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
 u.update({'counter': tc.get('us') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
 if not x.get('trade_day'): x['trade_day']=x['counter'].get('trade_day')
 if not u.get('trade_day'): u['trade_day']=u['counter'].get('trade_day')
-out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':u,'xetra':x}; w={k:v for k,v in {'status_current':se,'intraday_today':ie,'observer_cycles':ce,**tw}.items() if v}
+out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':u,'xetra':x}; w={k:v for k,v in {'status_current':se,'intraday_today':ie,'observer_cycles':ce,'status_current_xetra':sex,'intraday_today_xetra':iex,'observer_cycles_xetra':cex,**tw}.items() if v}
 if w: out['warnings']=w
 print(json.dumps(out))
 PY`
@@ -1520,6 +1520,22 @@ function isXetraSessionDayActive(sessionWindow) {
   );
 }
 
+function isBerlinXetraTradingWindow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Berlin",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(now);
+  const weekday = parts.find(part => part.type === "weekday")?.value || "";
+  const hour = Number(parts.find(part => part.type === "hour")?.value || "0");
+  const minute = Number(parts.find(part => part.type === "minute")?.value || "0");
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
+  const minutes = hour * 60 + minute;
+  return isWeekday && minutes >= 9 * 60 && minutes <= 17 * 60 + 30;
+}
+
 function createDefaultNoahTile(key) {
   const labels = {
     xetra_status: "Xetra",
@@ -1733,9 +1749,21 @@ function buildNoahTiles(summary) {
   const xetraCycleToday = isSameTradeDayInZone(xetra.latest_cycle_at, "Europe/Berlin", now);
   const xetraTradeDayToday = normalizeTradeDay(xetra.trade_day) === formatDateInZone(now, "Europe/Berlin");
   const xetraSessionDayActive = isXetraSessionDayActive(xetra.session_window);
+  const xetraSession = String(xetra.session_state || "").toUpperCase();
+  const xetraWithinTradingWindow = isBerlinXetraTradingWindow(now);
+  const xetraTradingActive =
+    xetraWithinTradingWindow &&
+    (Boolean(xetra.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY", "OPEN"].includes(xetraSession));
   const xetraActivitySeen = xetraOpenPositions > 0 || xetraClosedPositions > 0;
   const xetraDayActive = xetraSessionDayActive || xetraTradeDayToday || xetraCycleToday || xetraActivitySeen;
-  const xetraRunning = xetraState === "running";
+  const xetraRunning = xetraState === "running" || xetraTradingActive;
+  const xetraIntervalSec = Number(xetra.cycle_interval_sec || 300);
+  const xetraDerivedLastCycleAt =
+    xetra.latest_cycle_at
+      ? xetra.latest_cycle_at
+      : xetra.next_cycle_at
+        ? new Date(new Date(xetra.next_cycle_at).getTime() - xetraIntervalSec * 1000).toISOString()
+        : null;
   const xetraScheduledStartMs = Date.parse(String(xetraStartAt || ""));
   const xetraScheduledStartKnown = !Number.isNaN(xetraScheduledStartMs);
   const xetraPreOpen =
@@ -1745,16 +1773,21 @@ function buildNoahTiles(summary) {
     xetraTradeDayToday &&
     (!xetraScheduledStartKnown || xetraScheduledStartMs > now.getTime());
   const xetraAwaitingLive = !xetraRunning && !xetraDayActive && !xetraPreOpen;
+  const xetraPostClose = !xetraWithinTradingWindow && xetraTradeDayToday && !xetraPreOpen;
   const xetraStatus =
     xetraRunning
       ? "ok"
+      : xetraPostClose
+        ? "idle"
       : xetraPreOpen
         ? "idle"
       : ["planned", "starting", "stopping"].includes(xetraState)
         ? "warn"
         : ["failed", "error"].includes(xetraState)
           ? "error"
-          : "idle";
+          : xetraDayActive
+            ? "warn"
+            : "idle";
   const usSession = String(us.session_state || "offline").toUpperCase();
   const usCounter = readCounterSnapshot("us", us.counter, now.getTime());
   const usOpenPositions = usCounter.open;
@@ -1776,6 +1809,8 @@ function buildNoahTiles(summary) {
   const xetraStatusFooter =
     xetraRunning
       ? "Laeuft"
+      : xetraPostClose
+        ? "Geschlossen"
       : xetraPreOpen
         ? `Start ${formatBerlinTime(xetraStartAt)}`
       : xetraAwaitingLive
@@ -1790,7 +1825,9 @@ function buildNoahTiles(summary) {
 
   const xetraCycleFooter =
     xetraRunning
-      ? formatCountdown(xetra.next_cycle_at)
+      ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Laeuft")
+      : xetraPostClose
+        ? "Geschlossen"
       : xetraPreOpen
         ? `Start ${formatBerlinTime(xetraStartAt)}`
       : xetraAwaitingLive
@@ -1824,10 +1861,22 @@ function buildNoahTiles(summary) {
       key: "xetra_cycle",
       label: "Xetra Zyklus",
       status: tileStatus(xetraStatus),
-      line1: xetraPreOpen ? `Start ${formatBerlinTime(xetraStartAt)}` : xetraAwaitingLive ? "Live unklar" : xetra.latest_cycle_at ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}` : "Kein Zyklus",
+      line1: xetraRunning
+        ? (xetraDerivedLastCycleAt ? `Letz ${formatBerlinTime(xetraDerivedLastCycleAt)}` : "Live")
+        : xetraPostClose
+          ? "Session Ende"
+        : xetraPreOpen
+          ? `Start ${formatBerlinTime(xetraStartAt)}`
+          : xetraAwaitingLive
+            ? "Live unklar"
+            : xetra.latest_cycle_at
+              ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`
+              : "Kein Zyklus",
       line2:
         xetraRunning
-          ? formatCountdown(xetra.next_cycle_at)
+          ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Warte Tick")
+          : xetraPostClose
+            ? "--:--"
           : xetraPreOpen
             ? formatCountdown(xetraStartAt)
           : xetraAwaitingLive
@@ -2186,6 +2235,9 @@ async function startCommand(args) {
 
 async function serve() {
   await ensureDataFile();
+  const uiTick = setInterval(() => {
+    void broadcastStateStream().catch(() => {});
+  }, 1_000);
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
@@ -2320,6 +2372,9 @@ async function serve() {
   server.listen(PORT, HOST, () => {
     console.log(`Codex Monitor Bridge listening on http://${HOST}:${PORT}`);
     console.log(`State file: ${DATA_FILE}`);
+  });
+  server.on("close", () => {
+    clearInterval(uiTick);
   });
 }
 
