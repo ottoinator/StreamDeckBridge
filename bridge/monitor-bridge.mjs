@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 const AGENT_HEARTBEAT_TIMEOUT_MS = 90_000;
 const AGENT_PROBE_TTL_MS = 15_000;
 const NOAH_MONITOR_TTL_MS = 15_000;
-const PUSH_ONLY_AGENT_STATES = process.env.CODEX_MONITOR_AGENT_PUSH_ONLY === "1";
+const PUSH_ONLY_AGENT_STATES = !["0", "false", "no", "off"].includes(String(process.env.CODEX_MONITOR_AGENT_PUSH_ONLY || "1").trim().toLowerCase());
 const AGENT_PUSH_TOKEN = String(process.env.CODEX_MONITOR_AGENT_PUSH_TOKEN || "").trim();
 const THREAD_HEARTBEAT_TIMEOUT_MS = Number(process.env.CODEX_MONITOR_THREAD_HEARTBEAT_TIMEOUT_MS || 180_000);
 const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS || 900_000);
@@ -93,7 +93,8 @@ const agentProbeCache = new Map();
 const agentProbeInflight = new Map();
 const noahMonitorCache = {
   cachedAt: 0,
-  result: null
+  result: null,
+  lastGoodResult: null
 };
 let noahMonitorInflight = null;
 const NOAH_MONITOR_DEFAULTS = {
@@ -101,153 +102,82 @@ const NOAH_MONITOR_DEFAULTS = {
   command:
     process.env.CODEX_MONITOR_NOAH_MONITOR_COMMAND ||
     String.raw`python3 - <<'PY'
-from __future__ import annotations
-import json
-import subprocess
-import urllib.request
-from datetime import datetime, time, timedelta, timezone
+import json,subprocess,urllib.request
+from datetime import datetime,time,timedelta,timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
-BASE_DIR = Path('/root/.openclaw/workspace/.pi')
-REGISTRY_PATH = BASE_DIR / 'artifacts' / 'xetra_behavior_smoke_registry.json'
-
-
-def parse_iso(value):
-    if not value:
-        return None
+B=Path('/root/.openclaw/workspace/.pi');R=B/'artifacts'/'xetra_behavior_smoke_registry.json'
+def p(v):
+    try:return datetime.fromisoformat(str(v)) if v else None
+    except Exception:return None
+def iso(v): return v.isoformat() if v else None
+def r(x):
+    try:return json.loads(Path(x).read_text(encoding='utf-8')) if x and Path(x).exists() else None
+    except Exception:return None
+def jl(x):
+    if not x or not Path(x).exists(): return None
+    last=None
     try:
-        return datetime.fromisoformat(str(value))
-    except Exception:
-        return None
-
-
-def iso_or_none(value):
-    return value.isoformat() if value else None
-
-
-def read_json(path):
-    if not path or not Path(path).exists():
-        return None
-    try:
-        return json.loads(Path(path).read_text(encoding='utf-8'))
-    except Exception:
-        return None
-
-
-def service_token():
-    try:
-        service = subprocess.check_output(['systemctl', 'cat', 'noah_companion_api.service'], text=True)
-    except Exception:
-        return None
-    prefix = 'Environment=NOAH_COMPANION_API_TOKEN='
-    for line in service.splitlines():
-        if line.startswith(prefix):
-            return line.split('=', 2)[2].strip()
-    return None
-
-
-def fetch_json(path, token):
-    headers = {'Accept': 'application/json'}
-    if token:
-        headers['Authorization'] = 'Bearer ' + token
-    request = urllib.request.Request('http://127.0.0.1:8765' + path, headers=headers)
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.load(response)
-
-
-def next_us_open_berlin(now_utc):
-    tz_et = ZoneInfo('America/New_York')
-    tz_berlin = ZoneInfo('Europe/Berlin')
-    now_et = now_utc.astimezone(tz_et)
-    candidate_date = now_et.date()
+        for line in Path(x).open('r',encoding='utf-8'):
+            line=line.strip()
+            if line: last=json.loads(line)
+    except Exception:return None
+    return last
+def tok():
+    try:s=subprocess.check_output(['systemctl','cat','noah_companion_api.service'],text=True)
+    except Exception:return None
+    for line in s.splitlines():
+        if line.startswith('Environment=NOAH_COMPANION_API_TOKEN='): return line.split('=',2)[2].strip()
+def get(path,t):
+    h={'Accept':'application/json'}
+    if t: h['Authorization']='Bearer '+t
+    with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765'+path,headers=h),timeout=6) as y: return json.load(y)
+def safe(path,t):
+    try:return get(path,t),None
+    except Exception as e:return None,str(e)
+def nxt(now):
+    et=ZoneInfo('America/New_York'); de=ZoneInfo('Europe/Berlin'); now=now.astimezone(et); d=now.date()
     while True:
-        candidate = datetime.combine(candidate_date, time(9, 30), tzinfo=tz_et)
-        if candidate.weekday() >= 5 or candidate <= now_et:
-            candidate_date += timedelta(days=1)
-            continue
-        return candidate.astimezone(tz_berlin)
-
-
-def xetra_summary():
-    registry = read_json(REGISTRY_PATH) or {}
-    active = registry.get('active_run') or {}
-    scheduled = registry.get('scheduled_run') or {}
-    last_run = registry.get('last_run') or {}
-    status_payload = None
-    for candidate in (active, scheduled, last_run):
-        status_payload = read_json(candidate.get('status_path'))
-        if status_payload:
-            break
-    if not status_payload:
-        entry = (registry.get('runs_by_trade_day') or {}).get((active or scheduled or last_run or {}).get('trade_day') or '')
-        status_payload = ((entry or {}).get('status')) or None
-    interval_sec = active.get('interval_sec') or scheduled.get('interval_sec') or 300
-    latest_cycle = parse_iso((status_payload or {}).get('latest_cycle_ts_et'))
-    next_cycle = latest_cycle + timedelta(seconds=int(interval_sec)) if latest_cycle else None
-    scheduled_start = parse_iso(active.get('scheduled_start_berlin') or scheduled.get('scheduled_start_berlin') or (status_payload or {}).get('scheduled_start_berlin'))
-    state = (status_payload or {}).get('state') or active.get('state') or scheduled.get('state') or last_run.get('state') or 'not_started'
-    return {
-        'state': state,
-        'trade_day': (status_payload or {}).get('trade_day') or active.get('trade_day') or scheduled.get('trade_day') or last_run.get('trade_day'),
-        'cycle_count': int((status_payload or {}).get('cycle_count') or 0),
-        'roundtrip_count': int((status_payload or {}).get('roundtrip_count') or 0),
-        'latest_cycle_at': iso_or_none(latest_cycle),
-        'next_cycle_at': iso_or_none(next_cycle),
-        'scheduled_start_at': iso_or_none(scheduled_start),
-        'session_window': (status_payload or {}).get('session_window'),
-        'interval_sec': int(interval_sec),
-        'source': 'registry',
-    }
-
-
-def main():
-    token = service_token()
-    now_utc = datetime.now(timezone.utc)
-    status = fetch_json('/api/v1/status/current', token)
-    intraday = fetch_json('/api/v1/intraday/today', token)
-    cycles = fetch_json('/api/v1/observer/cycles?limit=3', token)
-
-    cycle_items = cycles.get('cycles') or []
-    last_cycle = parse_iso(((status.get('system_health') or {}).get('last_successful_cycle_ts_et'))) or parse_iso((cycle_items[-1] if cycle_items else {}).get('ts_et'))
-    previous_cycle = parse_iso((cycle_items[-2] if len(cycle_items) >= 2 else {}).get('ts_et'))
-    interval_sec = int((last_cycle - previous_cycle).total_seconds()) if last_cycle and previous_cycle else 600
-    if interval_sec <= 0:
-        interval_sec = 600
-    next_cycle = last_cycle + timedelta(seconds=interval_sec) if last_cycle else None
-    session_state = ((status.get('trading_posture') or {}).get('session_state') or {})
-    policy_metrics = intraday.get('current_policy_metrics') or {}
-    entries_today = 0
-    for metrics in policy_metrics.values():
-        try:
-            entries_today += int(metrics.get('entries_today') or 0)
-        except Exception:
-            pass
-    roundtrips = len(((intraday.get('decision_trail_summary') or {}).get('roundtrips') or []))
-
-    payload = {
-        'checked_at': datetime.now(timezone.utc).isoformat(),
-        'us': {
-            'trade_day': intraday.get('trade_day'),
-            'market_open': bool(intraday.get('market_open')),
-            'session_state': session_state.get('code'),
-            'session_subtitle': session_state.get('subtitle'),
-            'headline': (status.get('human_status') or {}).get('headline'),
-            'health': ((status.get('system_health') or {}).get('status') or {}).get('code'),
-            'last_cycle_at': iso_or_none(last_cycle),
-            'next_cycle_at': iso_or_none(next_cycle),
-            'cycle_interval_sec': interval_sec,
-            'roundtrip_count': roundtrips,
-            'entries_today': entries_today,
-            'trade_ideas_count': int(intraday.get('trade_ideas_count') or 0),
-            'next_market_open_berlin': iso_or_none(next_us_open_berlin(now_utc)),
-        },
-        'xetra': xetra_summary(),
-    }
-    print(json.dumps(payload))
-
-
-main()
+        c=datetime.combine(d,time(9,30),tzinfo=et)
+        if c.weekday()<5 and c>now: return c.astimezone(de)
+        d+=timedelta(days=1)
+def sump(o,k):
+    n=0
+    for v in (o or {}).values():
+        try:n+=int((v or {}).get(k) or 0)
+        except Exception:pass
+    return n
+def opn(o):
+    n=0
+    for v in (o or {}).values():
+        x=(v or {}).get('open_positions')
+        if isinstance(x,dict): n+=len(x)
+        else:
+            try:n+=int(x or 0)
+            except Exception:pass
+    return n
+def xs():
+    reg=r(R) or {}; a=reg.get('active_run') or {}; s=reg.get('scheduled_run') or {}; l=reg.get('last_run') or {}; st=None
+    for c in (a,s,l):
+        st=r(c.get('status_path'))
+        if st: break
+    if not st:
+        e=(reg.get('runs_by_trade_day') or {}).get((a or s or l or {}).get('trade_day') or '')
+        st=((e or {}).get('status')) or {}
+    iv=a.get('interval_sec') or s.get('interval_sec') or 300; lc=p(st.get('latest_cycle_ts_et')); nc=lc+timedelta(seconds=int(iv)) if lc else None
+    bd=Path(a.get('base_dir') or s.get('base_dir') or l.get('base_dir') or st.get('base_dir') or B)
+    ps=r(bd/'paper_state.json') or {}; cy=jl(bd/'paper_cycle.log.jsonl') or {}
+    return {'state':st.get('state') or a.get('state') or s.get('state') or l.get('state') or 'not_started','trade_day':st.get('trade_day') or a.get('trade_day') or s.get('trade_day') or l.get('trade_day'),'cycle_count':int(st.get('cycle_count') or 0),'roundtrip_count':int(st.get('roundtrip_count') or 0),'open_positions':opn((ps.get('policies') or (cy.get('policies') or {}))),'closed_positions':int(st.get('roundtrip_count') or 0),'latest_cycle_at':iso(lc),'next_cycle_at':iso(nc),'scheduled_start_at':iso(p(a.get('scheduled_start_berlin') or s.get('scheduled_start_berlin') or st.get('scheduled_start_berlin'))),'session_window':st.get('session_window'),'interval_sec':int(iv),'source':'registry'}
+def us(now,st,it,cy):
+    rows=(cy or {}).get('cycles') or []; lc=p((((st or {}).get('system_health') or {}).get('last_successful_cycle_ts_et')) or ((rows[-1] if rows else {}).get('ts_et'))); pc=p((rows[-2] if len(rows)>=2 else {}).get('ts_et')); iv=int((lc-pc).total_seconds()) if lc and pc else 600
+    if iv<=0: iv=600
+    ss=(((st or {}).get('trading_posture') or {}).get('session_state') or {}); pm=((it or {}).get('current_policy_metrics') or {}); ts=((it or {}).get('decision_trail_summary') or {}); rt=len(ts.get('roundtrips') or [])
+    mk=bool((it or {}).get('market_open')) or ss.get('code') in ('TRADEABLE','DEFENSIVE','CLOSE_ONLY')
+    return {'trade_day':(it or {}).get('trade_day') or (cy or {}).get('trade_day'),'market_open':mk,'session_state':ss.get('code'),'session_subtitle':ss.get('subtitle'),'headline':(((st or {}).get('human_status') or {}).get('headline')),'health':((((st or {}).get('system_health') or {}).get('status') or {}).get('code')),'last_cycle_at':iso(lc),'next_cycle_at':iso(lc+timedelta(seconds=iv) if lc else None),'cycle_interval_sec':iv,'roundtrip_count':rt,'open_positions':sump(pm,'open_positions'),'closed_positions':max(rt,sump(ts.get('policy_summary') or {},'positions_closed'),sump(pm,'exits_today')),'entries_today':sump(pm,'entries_today'),'trade_ideas_count':int((it or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(nxt(now))}
+t=tok(); now=datetime.now(timezone.utc); st,se=safe('/api/v1/status/current',t); it,ie=safe('/api/v1/intraday/today',t); cy,ce=safe('/api/v1/observer/cycles?limit=3',t)
+out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':us(now,st,it,cy),'xetra':xs()}; w={k:v for k,v in {'status_current':se,'intraday_today':ie,'observer_cycles':ce}.items() if v}
+if w: out['warnings']=w
+print(json.dumps(out))
 PY`
 };
 
@@ -914,12 +844,36 @@ async function loadEffectiveAgents() {
   const agents = await readAgents();
   const now = Date.now();
   const heartbeatNormalized = agents.map(agent => {
+    const lastSeenAgeMs = agent.lastSeenAt ? now - Date.parse(agent.lastSeenAt) : Number.NaN;
+    const pushGapDetail = Number.isFinite(lastSeenAgeMs)
+      ? `Push unterbrochen seit ${formatAgeCompact(lastSeenAgeMs)} (letztes Signal ${formatLocalClock(agent.lastSeenAt)})`
+      : "Warte auf Push";
+    if (PUSH_ONLY_AGENT_STATES && !agent.heartbeatAt) {
+      if (agent.status === "offline" || agent.status === "online") {
+        return applyAgentPatch(agent, {
+          status: "attention",
+          detail: pushGapDetail,
+          activity: false,
+          blinkUntil: null
+        });
+      }
+      return agent;
+    }
     if (agent.status === "offline" || !agent.heartbeatAt) {
       return agent;
     }
     const age = now - Date.parse(agent.heartbeatAt);
     if (Number.isNaN(age) || age <= AGENT_HEARTBEAT_TIMEOUT_MS) {
       return agent;
+    }
+    if (PUSH_ONLY_AGENT_STATES) {
+      return applyAgentPatch(agent, {
+        status: "attention",
+        detail: pushGapDetail,
+        activity: false,
+        heartbeatAt: null,
+        blinkUntil: null
+      });
     }
     return applyAgentPatch(agent, {
       status: "offline",
@@ -957,6 +911,32 @@ function parseBooleanFlag(value, fallback = false) {
 
 function futureIso(offsetMs) {
   return new Date(Date.now() + offsetMs).toISOString();
+}
+
+function formatLocalClock(value) {
+  if (!value) {
+    return "--:--";
+  }
+  const parsed = Date.parse(String(value));
+  if (Number.isNaN(parsed)) {
+    return "--:--";
+  }
+  return new Intl.DateTimeFormat("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Europe/Berlin"
+  }).format(new Date(parsed));
+}
+
+function formatAgeCompact(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = seconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${String(remSeconds).padStart(2, "0")}s`;
+  }
+  return `${remSeconds}s`;
 }
 
 async function fetchJson(url, options = {}) {
@@ -1385,6 +1365,56 @@ function formatCountdown(target) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatDateInZone(value, timeZone) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(value);
+}
+
+function normalizeTradeDay(value) {
+  if (!value) {
+    return "";
+  }
+  const raw = String(value).trim();
+  const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) {
+    return isoMatch[1];
+  }
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    return "";
+  }
+  return formatDateInZone(new Date(parsed), "UTC");
+}
+
+function isSameTradeDayInZone(value, timeZone, now = new Date()) {
+  if (!value) {
+    return false;
+  }
+  const parsed = Date.parse(String(value));
+  if (Number.isNaN(parsed)) {
+    return false;
+  }
+  return formatDateInZone(new Date(parsed), timeZone) === formatDateInZone(now, timeZone);
+}
+
+function nextBerlinWeekdayTime(hour, minute, now = new Date()) {
+  const berlinNow = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Berlin" }));
+  const candidate = new Date(berlinNow);
+  candidate.setHours(hour, minute, 0, 0);
+  if (candidate <= berlinNow) {
+    candidate.setDate(candidate.getDate() + 1);
+  }
+  while (candidate.getDay() === 0 || candidate.getDay() === 6) {
+    candidate.setDate(candidate.getDate() + 1);
+  }
+  const deltaMs = candidate.getTime() - berlinNow.getTime();
+  return new Date(now.getTime() + deltaMs).toISOString();
+}
+
 function titleCaseValue(value) {
   return String(value || "")
     .trim()
@@ -1420,7 +1450,7 @@ function formatUsSessionLabel(value, marketOpen) {
 
 function createDefaultNoahTile(key) {
   const labels = {
-    xetra_status: "Xetra Smoke",
+    xetra_status: "Xetra",
     xetra_cycle: "Xetra Zyklus",
     us_status: "US Handel",
     us_cycle: "US Zyklus"
@@ -1436,6 +1466,10 @@ function createDefaultNoahTile(key) {
   };
 }
 
+function formatTradeCountLine(label, value) {
+  return `${label} ${Number(value || 0)}`;
+}
+
 function makeNoahProbeFallback(message) {
   return {
     checked_at: nowIso(),
@@ -1445,9 +1479,24 @@ function makeNoahProbeFallback(message) {
   };
 }
 
+function hasUsableNoahSummary(summary) {
+  if (!summary || summary.error) {
+    return false;
+  }
+  return Boolean(summary.us || summary.xetra);
+}
+
+function buildStaleNoahSummary(previous, message) {
+  return {
+    ...previous,
+    checked_at: nowIso(),
+    stale_reason: String(message || "Noah Monitor nicht verfuegbar")
+  };
+}
+
 async function probeNoahMonitor() {
   try {
-    return await runSshJson(NOAH_MONITOR_DEFAULTS.host, NOAH_MONITOR_DEFAULTS.command, 20_000);
+    return await runSshJson(NOAH_MONITOR_DEFAULTS.host, NOAH_MONITOR_DEFAULTS.command, 45_000);
   } catch (error) {
     return makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
   }
@@ -1464,13 +1513,22 @@ async function getCachedNoahMonitor() {
 
   noahMonitorInflight = probeNoahMonitor()
     .then(result => {
+      const usableResult =
+        result?.error && noahMonitorCache.lastGoodResult
+          ? buildStaleNoahSummary(noahMonitorCache.lastGoodResult, result.error)
+          : result;
       noahMonitorCache.cachedAt = Date.now();
-      noahMonitorCache.result = result;
+      noahMonitorCache.result = usableResult;
+      if (hasUsableNoahSummary(usableResult)) {
+        noahMonitorCache.lastGoodResult = usableResult;
+      }
       noahMonitorInflight = null;
-      return result;
+      return usableResult;
     })
     .catch(error => {
-      const fallback = makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
+      const fallback = noahMonitorCache.lastGoodResult
+        ? buildStaleNoahSummary(noahMonitorCache.lastGoodResult, error instanceof Error ? error.message : String(error))
+        : makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
       noahMonitorCache.cachedAt = Date.now();
       noahMonitorCache.result = fallback;
       noahMonitorInflight = null;
@@ -1498,89 +1556,159 @@ function getImmediateNoahMonitor() {
 }
 
 function buildNoahTiles(summary) {
+  const now = new Date();
   const updatedAt = summary?.checked_at || nowIso();
   if (summary?.error) {
+    const xetraStartAt = nextBerlinWeekdayTime(9, 0, now);
+    const usStartAt = nextBerlinWeekdayTime(15, 30, now);
+    const fallbackTiles = {
+      xetra_status: {
+        key: "xetra_status",
+        label: "Xetra",
+        status: "idle",
+        line1: `Start ${formatBerlinTime(xetraStartAt)}`,
+        line2: formatCountdown(xetraStartAt),
+        footer: "Warte auf Daten",
+        updatedAt
+      },
+      xetra_cycle: {
+        key: "xetra_cycle",
+        label: "Xetra Zyklus",
+        status: "idle",
+        line1: `Start ${formatBerlinTime(xetraStartAt)}`,
+        line2: formatCountdown(xetraStartAt),
+        footer: "Warte auf Daten",
+        updatedAt
+      },
+      us_status: {
+        key: "us_status",
+        label: "US Handel",
+        status: "idle",
+        line1: `Start ${formatBerlinTime(usStartAt)}`,
+        line2: formatCountdown(usStartAt),
+        footer: "Warte auf Daten",
+        updatedAt
+      },
+      us_cycle: {
+        key: "us_cycle",
+        label: "US Zyklus",
+        status: "idle",
+        line1: `Start ${formatBerlinTime(usStartAt)}`,
+        line2: formatCountdown(usStartAt),
+        footer: "Warte auf Daten",
+        updatedAt
+      }
+    };
     return NOAH_TILE_ORDER.map(key => ({
       ...createDefaultNoahTile(key),
-      status: "error",
-      line1: "Probe Fehler",
-      line2: String(summary.error),
-      updatedAt
+      ...(fallbackTiles[key] || {})
     }));
   }
 
   const xetra = summary?.xetra || {};
   const us = summary?.us || {};
+  const monitorDegraded = Boolean(summary?.stale_reason || Object.keys(summary?.warnings || {}).length);
+  const tileStatus = status => (status === "error" ? "error" : monitorDegraded ? "warn" : status);
   const xetraState = String(xetra.state || "not_started").toLowerCase();
+  const xetraOpenPositions = Number(xetra.open_positions || 0);
+  const xetraClosedPositions = Number((xetra.closed_positions ?? xetra.roundtrip_count) || 0);
+  const xetraStartAt = xetra.scheduled_start_at || nextBerlinWeekdayTime(9, 0, now);
+  const xetraCycleToday = isSameTradeDayInZone(xetra.latest_cycle_at, "Europe/Berlin", now);
+  const xetraTradeDayToday = normalizeTradeDay(xetra.trade_day) === formatDateInZone(now, "Europe/Berlin");
+  const xetraRunning = xetraState === "running";
+  const xetraPreOpen = !xetraRunning && !xetraCycleToday && !xetraTradeDayToday;
   const xetraStatus =
-    xetraState === "running"
+    xetraRunning
       ? "ok"
+      : xetraPreOpen
+        ? "idle"
       : ["planned", "starting", "stopping"].includes(xetraState)
         ? "warn"
         : ["failed", "error"].includes(xetraState)
           ? "error"
           : "idle";
   const usSession = String(us.session_state || "offline").toUpperCase();
+  const usOpenPositions = Number(us.open_positions || 0);
+  const usClosedPositions = Number((us.closed_positions ?? us.roundtrip_count) || 0);
   const usTradingActive = Boolean(us.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession);
+  const usStartAt = us.next_market_open_berlin || nextBerlinWeekdayTime(15, 30, now);
+  const usCycleToday = isSameTradeDayInZone(us.last_cycle_at, "America/New_York", now);
+  const usTradeDayToday = normalizeTradeDay(us.trade_day) === formatDateInZone(now, "America/New_York");
+  const usPreOpen = !usTradingActive && !usCycleToday && !usTradeDayToday;
   const usStatus =
     usTradingActive
       ? "ok"
+      : usPreOpen
+        ? "idle"
       : us.health === "INTERVENTION_REQUIRED"
         ? "error"
         : "warn";
 
-  const xetraFooter =
-    xetraState === "running"
-      ? formatCountdown(xetra.next_cycle_at)
-      : xetra.scheduled_start_at
-        ? formatCountdown(xetra.scheduled_start_at)
-        : xetra.session_window || "--:--";
+  const xetraStatusFooter =
+    xetraRunning
+      ? "Laeuft"
+      : xetraPreOpen
+        ? `Start ${formatBerlinTime(xetraStartAt)}`
+      : ["planned", "starting", "stopping"].includes(xetraState)
+        ? `Start ${formatBerlinTime(xetraStartAt)}`
+        : xetra.latest_cycle_at
+          ? "Geschlossen"
+          : "Nicht aktiv";
 
-  const usFooter =
-    usTradingActive
-      ? formatCountdown(us.next_cycle_at)
-      : formatCountdown(us.next_market_open_berlin);
+  const xetraCycleFooter =
+    xetraRunning
+      ? formatCountdown(xetra.next_cycle_at)
+      : xetraPreOpen
+        ? `Start ${formatBerlinTime(xetraStartAt)}`
+      : xetra.latest_cycle_at
+        ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`
+        : xetra.session_window || "Nicht aktiv";
+
+  const usStatusFooter = usTradingActive ? formatUsSessionLabel(us.session_state, Boolean(us.market_open)) : `Start ${formatBerlinTime(usStartAt)}`;
+  const usCycleFooter = usTradingActive ? formatCountdown(us.next_cycle_at) : `Start ${formatBerlinTime(usStartAt)}`;
 
   const tiles = {
     xetra_status: {
       key: "xetra_status",
-      label: "Xetra Smoke",
-      status: xetraStatus,
-      line1:
-        xetraState === "running"
-          ? "Laeuft"
-          : xetraState === "not_started"
-            ? "Nicht aktiv"
-            : titleCaseValue(xetra.state || "unbekannt"),
-      line2: `Trades ${Number(xetra.roundtrip_count || 0)}`,
-      footer: xetraFooter,
+      label: "Xetra",
+      status: tileStatus(xetraStatus),
+      line1: xetraPreOpen ? `Start ${formatBerlinTime(xetraStartAt)}` : formatTradeCountLine("Open", xetraOpenPositions),
+      line2: xetraPreOpen ? formatCountdown(xetraStartAt) : formatTradeCountLine("Closed", xetraClosedPositions),
+      footer: xetraStatusFooter,
       updatedAt
     },
     xetra_cycle: {
       key: "xetra_cycle",
       label: "Xetra Zyklus",
-      status: xetraStatus,
-      line1: `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`,
-      line2: `C${Number(xetra.cycle_count || 0)} T${Number(xetra.roundtrip_count || 0)}`,
-      footer: xetraFooter,
+      status: tileStatus(xetraStatus),
+      line1: xetraPreOpen ? `Start ${formatBerlinTime(xetraStartAt)}` : xetra.latest_cycle_at ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}` : "Kein Zyklus",
+      line2:
+        xetraRunning
+          ? formatCountdown(xetra.next_cycle_at)
+          : xetraPreOpen
+            ? formatCountdown(xetraStartAt)
+          : ["planned", "starting", "stopping"].includes(xetraState)
+            ? formatCountdown(xetraStartAt)
+            : "Kein Timer",
+      footer: xetraRunning ? "Naechster" : xetraCycleFooter,
       updatedAt
     },
     us_status: {
       key: "us_status",
       label: "US Handel",
-      status: usStatus,
-      line1: formatUsSessionLabel(us.session_state, Boolean(us.market_open)),
-      line2: us.market_open ? `Trades ${Number(us.roundtrip_count || 0)}` : `Start ${formatBerlinTime(us.next_market_open_berlin)}`,
-      footer: usFooter,
+      status: tileStatus(usStatus),
+      line1: usPreOpen ? `Start ${formatBerlinTime(usStartAt)}` : formatTradeCountLine("Open", usOpenPositions),
+      line2: usPreOpen ? formatCountdown(usStartAt) : formatTradeCountLine("Closed", usClosedPositions),
+      footer: usStatusFooter,
       updatedAt
     },
     us_cycle: {
       key: "us_cycle",
       label: "US Zyklus",
-      status: usTradingActive ? usStatus : "idle",
-      line1: usTradingActive ? `Letz ${formatBerlinTime(us.last_cycle_at)}` : "Nicht aktiv",
-      line2: usTradingActive ? `T${Number(us.roundtrip_count || 0)} I${Number(us.trade_ideas_count || 0)}` : "Kein Zyklus",
-      footer: usTradingActive ? formatCountdown(us.next_cycle_at) : "--:--",
+      status: tileStatus(usTradingActive ? usStatus : "idle"),
+      line1: usPreOpen ? `Start ${formatBerlinTime(usStartAt)}` : us.last_cycle_at ? `Letz ${formatBerlinTime(us.last_cycle_at)}` : "Kein Zyklus",
+      line2: usTradingActive ? formatCountdown(us.next_cycle_at) : formatCountdown(usStartAt),
+      footer: usTradingActive ? "Naechster" : "Start",
       updatedAt
     }
   };
