@@ -170,6 +170,7 @@ Hinweis:
 - `online` mit `--activity true`: gruen blinkend
 - `attention`: gelb blinkend
 - `offline`: rot
+- Frische Push-Signale haben Vorrang. Wenn kein aktueller Push mehr anliegt, faellt die Bridge automatisch auf die Remote-Probe zurueck statt nur gelb zu blinken.
 - Remote-Probes setzen standardmaessig nur noch Verfuegbarkeit. Fuer echtes "arbeitet gerade" nutze bewusst `heartbeat-agent --activity true` oder `POST /agents/:name` mit `"activity": true`.
 - Fuer explizite OpenAI- oder Aktivitaetsdaten aus einem Remote-JSON-Endpunkt kann die Bridge jetzt direkt blinken, ohne das alte Dateisystem-Fallback zu aktivieren.
 - Falls du das alte, aus Remote-Dateiaktivitaet abgeleitete Blinken trotzdem willst, setze `CODEX_MONITOR_REMOTE_AGENT_ACTIVITY=1`.

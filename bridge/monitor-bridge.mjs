@@ -942,10 +942,6 @@ async function loadEffectiveAgents() {
       blinkUntil: null
     });
   });
-  if (PUSH_ONLY_AGENT_STATES) {
-    await writeAgents(heartbeatNormalized);
-    return heartbeatNormalized;
-  }
   const remotelyProbed = await overlayRemoteAgentStates(heartbeatNormalized);
   await writeAgents(remotelyProbed);
   return remotelyProbed;
@@ -1349,10 +1345,7 @@ async function overlayRemoteAgentStates(agents) {
     const probe = results[index];
     const next = { ...agent };
     const heartbeatAge = agent.heartbeatAt ? Date.now() - Date.parse(agent.heartbeatAt) : Number.POSITIVE_INFINITY;
-    const hasRecentExplicitSignal =
-      Number.isFinite(heartbeatAge) &&
-      heartbeatAge <= AGENT_HEARTBEAT_TIMEOUT_MS &&
-      (agent.activity || agent.status === "attention");
+    const hasRecentExplicitSignal = Number.isFinite(heartbeatAge) && heartbeatAge <= AGENT_HEARTBEAT_TIMEOUT_MS;
     const previous = agentProbeCache.get(agent.name)?.previousResult;
     const remoteActivityEnabled = probe.allowRemoteActivity || ENABLE_REMOTE_AGENT_ACTIVITY;
     const changedActivityMetric =
