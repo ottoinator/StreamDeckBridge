@@ -4,3 +4,4 @@ _refs/
 *.tmp
 dist/
 .DS_Store
+bridge.runtime.json

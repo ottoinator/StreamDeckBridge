@@ -116,13 +116,34 @@ Bridge einmal als Hintergrunddienst-Ersatz einrichten:
 npm run service:install
 ```
 
-Das nutzt auf diesem Windows-Rechner einen versteckten Autostart-Launcher im Startup-Ordner, falls der Task Scheduler keine Registrierung erlaubt.
+Die Installation schreibt zuerst eine feste Runtime-Konfiguration nach `bridge.runtime.json`, damit die Bridge auch beim Systemstart ohne Benutzer-Session dieselben `CODEX_MONITOR_*`-Werte bekommt.
+
+Wenn PowerShell mit Admin-Rechten laeuft, richtet `service:install` einen echten Start-beim-Boot-Task ein:
+
+- Task: `Codex Stream Deck Monitor Bridge`
+- Trigger: Windows-Start
+- Konto: `SYSTEM`
+- Verhalten: laeuft auch ohne Benutzer-Login
+
+Ohne Admin-Rechte richtet `service:install` automatisch den bestmoeglichen Fallback ein:
+
+- Task: `Codex Stream Deck Monitor Bridge (Logon)`
+- plus versteckter Launcher im Startup-Ordner
+- Verhalten: startet beim naechsten Benutzer-Login
+
+Wenn du bootfesten Hintergrundbetrieb willst, fuehre denselben Befehl einmal in einer als Administrator gestarteten PowerShell aus.
 
 Manuell starten und stoppen:
 
 ```powershell
 npm run service:start
 npm run service:stop
+```
+
+Die eigentliche Bridge laeuft dabei ueber:
+
+```text
+scripts/run-bridge.ps1
 ```
 
 ## Slots manuell setzen

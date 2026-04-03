@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $processes = Get-CimInstance Win32_Process | Where-Object {
     $_.Name -match 'powershell(.exe)?|pwsh(.exe)?|node(.exe)?' -and
-    $_.CommandLine -match 'monitor-bridge\.mjs|run-bridge-loop\.ps1'
+    $_.CommandLine -match 'monitor-bridge\.mjs|run-bridge\.ps1|run-bridge-loop\.ps1'
 }
 
 if (-not $processes) {

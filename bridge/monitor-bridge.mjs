@@ -7,7 +7,7 @@ import path from "node:path";
 
 const PORT = Number(process.env.CODEX_MONITOR_PORT || 4567);
 const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
-const DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
+const DATA_DIR = process.env.CODEX_MONITOR_DATA_DIR || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
 const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
