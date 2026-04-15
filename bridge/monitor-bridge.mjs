@@ -173,14 +173,14 @@ def xs():
     bd=Path(a.get('base_dir') or s.get('base_dir') or l.get('base_dir') or st.get('base_dir') or B)
     ps=r(bd/'paper_state.json') or {}; cy=jl(bd/'paper_cycle.log.jsonl') or {}
     return {'state':st.get('state') or a.get('state') or s.get('state') or l.get('state') or 'not_started','trade_day':st.get('trade_day') or a.get('trade_day') or s.get('trade_day') or l.get('trade_day'),'cycle_count':int(st.get('cycle_count') or 0),'roundtrip_count':int(st.get('roundtrip_count') or 0),'open_positions':opn((ps.get('policies') or (cy.get('policies') or {}))),'closed_positions':int(st.get('roundtrip_count') or 0),'latest_cycle_at':iso(lc),'next_cycle_at':iso(nc),'scheduled_start_at':iso(p(a.get('scheduled_start_berlin') or s.get('scheduled_start_berlin') or st.get('scheduled_start_berlin'))),'session_window':st.get('session_window'),'interval_sec':int(iv),'source':'registry'}
-def us(now,st,it,cy):
-    rows=(cy or {}).get('cycles') or []; cr=((st or {}).get('cycle_runtime') or {}); lc=p((((st or {}).get('system_health') or {}).get('last_successful_cycle_ts_et')) or ((rows[-1] if rows else {}).get('ts_et'))); pc=p((rows[-2] if len(rows)>=2 else {}).get('ts_et')); iv=int((lc-pc).total_seconds()) if lc and pc else int((cr.get('cycle_interval_minutes') or 10)*60)
+def view(now,card,observer,next_open=None):
+    card=card or {}; observer=observer or {}; latest=(card.get('latest') or {}); posture=(card.get('posture') or {}); health=(card.get('health') or {}); trade=((observer.get('trade_activity') or {}))
+    iv=int((((card.get('cycle_runtime') or {}).get('cycle_interval_minutes')) or card.get('cycle_interval_minutes') or 10)*60)
     if iv<=0: iv=600
-    nx=p(cr.get('next_cycle_ts_et'))
-    if not lc and nx: lc=nx-timedelta(seconds=iv)
-    ss=(((st or {}).get('trading_posture') or {}).get('session_state') or {}); pm=((it or {}).get('current_policy_metrics') or {}); ts=((it or {}).get('decision_trail_summary') or {}); rt=len(ts.get('roundtrips') or [])
-    mk=bool((it or {}).get('market_open')) or ss.get('code') in ('TRADEABLE','DEFENSIVE','CLOSE_ONLY')
-    return {'trade_day':(it or {}).get('trade_day') or (cy or {}).get('trade_day'),'market_open':mk,'session_state':ss.get('code'),'session_subtitle':ss.get('subtitle'),'headline':(((st or {}).get('human_status') or {}).get('headline')),'health':((((st or {}).get('system_health') or {}).get('status') or {}).get('code')),'last_cycle_at':iso(lc),'next_cycle_at':iso(nx or (lc+timedelta(seconds=iv) if lc else None)),'cycle_interval_sec':iv,'roundtrip_count':rt,'open_positions':sump(pm,'open_positions'),'closed_positions':max(rt,sump(ts.get('policy_summary') or {},'positions_closed'),sump(pm,'exits_today')),'entries_today':sump(pm,'entries_today'),'trade_ideas_count':int((it or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(nxt(now))}
+    market_status=str(card.get('market_session_status') or '').strip().lower()
+    next_cycle=p(card.get('next_cycle_ts_et')) if market_status=='open' else None
+    last_cycle=p(latest.get('cycle_ts_et'))
+    return {'trade_day':card.get('trade_day') or observer.get('trade_day'),'market_open':bool(card.get('market_open')),'market_session_status':market_status or None,'session_state':posture.get('session_state'),'session_subtitle':posture.get('session_state_raw'),'headline':card.get('headline'),'health':health.get('system_health'),'last_cycle_at':iso(last_cycle),'latest_cycle_at':iso(last_cycle),'next_cycle_at':iso(next_cycle),'cycle_interval_sec':iv,'roundtrip_count':int(trade.get('closed_trades') or 0),'open_positions':int(trade.get('open_positions') or 0),'closed_positions':int(trade.get('closed_trades') or 0),'entries_today':0,'trade_ideas_count':int((latest or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(next_open) if next_open else None,'counter':cnt(observer, f"observer_{mkt(card.get('market') or observer.get('market') or observer.get('active_market')) or 'unknown'}"),'source':'status_card'}
 def ti(v):
     try:return int(v or 0)
     except Exception:return 0
@@ -222,19 +222,19 @@ def trade_counter(token):
         if counters[market] is None:
             counters[market]={'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}
     return counters,warnings
-t=tok(); now=datetime.now(timezone.utc); st,se=safe('/api/v1/status/current',t); it,ie=safe('/api/v1/intraday/today',t); cy,ce=safe('/api/v1/observer/cycles?limit=3',t)
-stx,sex=safe('/api/v1/status/current?market=xetra',t); itx,iex=safe('/api/v1/intraday/today?market=xetra',t); cyx,cex=safe('/api/v1/observer/cycles?market=xetra&limit=3',t)
-tc,tw=trade_counter(t)
-u=us(now,st,it,cy)
-x=us(now,stx,itx,cyx)
-if not (stx or itx or cyx):
+t=tok(); now=datetime.now(timezone.utc)
+us_card,use=safe('/api/v1/view/status-card?market=us',t); us_observer,uoe=safe('/api/v1/view/observer-card?market=us',t)
+x_card,xe=safe('/api/v1/view/status-card?market=xetra',t); x_observer,xoe=safe('/api/v1/view/observer-card?market=xetra',t)
+u=view(now,us_card,us_observer,nxt(now))
+x=view(now,x_card,x_observer)
+if not x_card:
     x=xs()
-x['source']=x.get('source') or ('companion_xetra' if (stx or itx or cyx) else 'registry')
-x.update({'counter': tc.get('xetra') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
-u.update({'counter': tc.get('us') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
+x['source']=x.get('source') or ('status_card_xetra' if x_card else 'registry')
+if not x.get('counter'): x.update({'counter': cnt(x_observer, 'observer_xetra') if x_observer else {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
+if not u.get('counter'): u.update({'counter': cnt(us_observer, 'observer_us') if us_observer else {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
 if not x.get('trade_day'): x['trade_day']=x['counter'].get('trade_day')
 if not u.get('trade_day'): u['trade_day']=u['counter'].get('trade_day')
-out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':u,'xetra':x}; w={k:v for k,v in {'status_current':se,'intraday_today':ie,'observer_cycles':ce,'status_current_xetra':sex,'intraday_today_xetra':iex,'observer_cycles_xetra':cex,**tw}.items() if v}
+out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':u,'xetra':x}; w={k:v for k,v in {'status_card_us':use,'observer_card_us':uoe,'status_card_xetra':xe,'observer_card_xetra':xoe}.items() if v}
 if w: out['warnings']=w
 print(json.dumps(out))
 PY`
@@ -1619,9 +1619,127 @@ function buildStaleNoahSummary(previous, message) {
   };
 }
 
+function getNoahMonitorBaseUrl() {
+  for (const candidate of [
+    process.env.CODEX_MONITOR_NOAH_API_BASE_URL,
+    process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL,
+    process.env.CODEX_MONITOR_NOAH_STATUS_URL
+  ]) {
+    const raw = String(candidate || "").trim();
+    if (!raw) {
+      continue;
+    }
+    try {
+      const url = new URL(raw);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function createNoahMonitorUrl(baseUrl, pathName, market) {
+  const url = new URL(pathName, baseUrl);
+  url.searchParams.set("market", market);
+  return url.toString();
+}
+
+function toNoahIso(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+function toNoahInt(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+}
+
+function buildNoahCounter(observerCard, market) {
+  const activity = observerCard?.trade_activity || {};
+  return {
+    open_positions: Math.max(0, toNoahInt(activity.open_positions, 0)),
+    closed_trades: Math.max(0, toNoahInt(activity.closed_trades, 0)),
+    trade_day: String(observerCard?.trade_day || ""),
+    source: `observer_${market}`,
+    fresh: true,
+    stale: false
+  };
+}
+
+function buildNoahMarketSummary(statusCard, observerCard, market) {
+  if (!statusCard && !observerCard) {
+    return null;
+  }
+  const latest = statusCard?.latest || {};
+  const posture = statusCard?.posture || {};
+  const health = statusCard?.health || {};
+  const cycleRuntime = statusCard?.cycle_runtime || {};
+  const marketSessionStatus = String(statusCard?.market_session_status || "").trim().toLowerCase() || null;
+  const counter = observerCard ? buildNoahCounter(observerCard, market) : null;
+  const cycleIntervalMinutes = toNoahInt(cycleRuntime.cycle_interval_minutes ?? statusCard?.cycle_interval_minutes, 10);
+  return {
+    trade_day: String(statusCard?.trade_day || observerCard?.trade_day || ""),
+    market_open: typeof statusCard?.market_open === "boolean" ? statusCard.market_open : marketSessionStatus === "open",
+    market_session_status: marketSessionStatus,
+    session_state: posture.session_state || null,
+    session_subtitle: posture.session_state_raw || null,
+    headline: statusCard?.headline || observerCard?.operator_summary || null,
+    health: health.system_health || null,
+    last_cycle_at: toNoahIso(latest.cycle_ts_et),
+    latest_cycle_at: toNoahIso(latest.cycle_ts_et),
+    next_cycle_at: toNoahIso(statusCard?.next_cycle_ts_et || cycleRuntime.next_cycle_ts_et),
+    cycle_interval_sec: Math.max(60, cycleIntervalMinutes * 60),
+    trade_ideas_count: Math.max(0, toNoahInt(latest.trade_ideas_count, 0)),
+    next_market_open_berlin: market === "us" ? nextBerlinWeekdayTime(15, 30) : null,
+    scheduled_start_at: market === "xetra" ? nextBerlinWeekdayTime(9, 0) : null,
+    state: marketSessionStatus === "open" ? "running" : "idle",
+    counter,
+    source: "companion_api"
+  };
+}
+
 async function probeNoahMonitor() {
   try {
-    return await runSshJson(NOAH_MONITOR_DEFAULTS.host, NOAH_MONITOR_DEFAULTS.command, 45_000);
+    const baseUrl = getNoahMonitorBaseUrl();
+    if (!baseUrl) {
+      return makeNoahProbeFallback("Noah API Basis-URL fehlt");
+    }
+
+    const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
+    const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 20_000);
+    const requests = [
+      ["status_card_us", createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", "us")],
+      ["observer_card_us", createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us")],
+      ["status_card_xetra", createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", "xetra")],
+      ["observer_card_xetra", createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "xetra")]
+    ];
+
+    const warnings = {};
+    const payloads = {};
+    for (const [key, url] of requests) {
+      try {
+        payloads[key] = await fetchJson(url, { headers, timeoutMs });
+      } catch (error) {
+        warnings[key] = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const summary = {
+      checked_at: nowIso(),
+      us: buildNoahMarketSummary(payloads.status_card_us, payloads.observer_card_us, "us"),
+      xetra: buildNoahMarketSummary(payloads.status_card_xetra, payloads.observer_card_xetra, "xetra")
+    };
+    if (Object.keys(warnings).length) {
+      summary.warnings = warnings;
+    }
+    if (!summary.us && !summary.xetra) {
+      return makeNoahProbeFallback("Noah API lieferte keine Markt-Daten");
+    }
+    return summary;
   } catch (error) {
     return makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
   }
@@ -1738,6 +1856,7 @@ function buildNoahTiles(summary) {
   const xetraCounter = readCounterSnapshot("xetra", xetra.counter, now.getTime());
   const xetraOpenPositions = xetraCounter.open;
   const xetraClosedPositions = xetraCounter.closed;
+  const xetraMarketStatus = String(xetra.market_session_status || "").toLowerCase();
   const xetraStartAt = xetra.scheduled_start_at || nextBerlinWeekdayTime(9, 0, now);
   const xetraCycleToday = isSameTradeDayInZone(xetra.latest_cycle_at, "Europe/Berlin", now);
   const xetraTradeDayToday = normalizeTradeDay(xetra.trade_day) === formatDateInZone(now, "Europe/Berlin");
@@ -1745,9 +1864,13 @@ function buildNoahTiles(summary) {
   const xetraSession = String(xetra.session_state || "").toUpperCase();
   const xetraWithinTradingWindow = isBerlinXetraTradingWindow(now);
   const xetraTradingActive =
-    xetraWithinTradingWindow &&
-    (Boolean(xetra.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY", "OPEN"].includes(xetraSession));
-  const xetraActivitySeen = xetraOpenPositions > 0 || xetraClosedPositions > 0;
+    xetraMarketStatus
+      ? xetraMarketStatus === "open"
+      : xetraWithinTradingWindow &&
+        (Boolean(xetra.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY", "OPEN"].includes(xetraSession));
+  const xetraExplicitClosed = xetraMarketStatus === "closed";
+  const xetraCounterToday = normalizeTradeDay(xetraCounter.tradeDay) === formatDateInZone(now, "Europe/Berlin");
+  const xetraActivitySeen = xetraCounterToday && (xetraOpenPositions > 0 || xetraClosedPositions > 0);
   const xetraDayActive = xetraSessionDayActive || xetraTradeDayToday || xetraCycleToday || xetraActivitySeen;
   const xetraRunning = xetraState === "running" || xetraTradingActive;
   const xetraIntervalSec = Number(xetra.cycle_interval_sec || 300);
@@ -1770,6 +1893,8 @@ function buildNoahTiles(summary) {
   const xetraStatus =
     xetraRunning
       ? "ok"
+      : xetraExplicitClosed
+        ? "idle"
       : xetraPostClose
         ? "idle"
       : xetraPreOpen
@@ -1785,7 +1910,11 @@ function buildNoahTiles(summary) {
   const usCounter = readCounterSnapshot("us", us.counter, now.getTime());
   const usOpenPositions = usCounter.open;
   const usClosedPositions = usCounter.closed;
-  const usTradingActive = Boolean(us.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession);
+  const usMarketStatus = String(us.market_session_status || "").toLowerCase();
+  const usTradingActive =
+    usMarketStatus
+      ? usMarketStatus === "open"
+      : Boolean(us.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession);
   const usStartAt = us.next_market_open_berlin || nextBerlinWeekdayTime(15, 30, now);
   const usCycleToday = isSameTradeDayInZone(us.last_cycle_at, "America/New_York", now);
   const usTradeDayToday = normalizeTradeDay(us.trade_day) === formatDateInZone(now, "America/New_York");
@@ -1793,15 +1922,15 @@ function buildNoahTiles(summary) {
   const usStatus =
     usTradingActive
       ? "ok"
-      : usPreOpen
-        ? "idle"
       : us.health === "INTERVENTION_REQUIRED"
         ? "error"
-        : "warn";
+        : "idle";
 
   const xetraStatusFooter =
     xetraRunning
       ? "Laeuft"
+      : xetraExplicitClosed
+        ? "Geschlossen"
       : xetraPostClose
         ? "Geschlossen"
       : xetraPreOpen
@@ -1819,6 +1948,8 @@ function buildNoahTiles(summary) {
   const xetraCycleFooter =
     xetraRunning
       ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Laeuft")
+      : xetraExplicitClosed
+        ? "Geschlossen"
       : xetraPostClose
         ? "Geschlossen"
       : xetraPreOpen
@@ -1856,6 +1987,8 @@ function buildNoahTiles(summary) {
       status: tileStatus(xetraStatus),
       line1: xetraRunning
         ? (xetraDerivedLastCycleAt ? `Letz ${formatBerlinTime(xetraDerivedLastCycleAt)}` : "Live")
+        : xetraExplicitClosed
+          ? (xetra.latest_cycle_at ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}` : "Geschlossen")
         : xetraPostClose
           ? "Session Ende"
         : xetraPreOpen
@@ -1868,6 +2001,8 @@ function buildNoahTiles(summary) {
       line2:
         xetraRunning
           ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Warte Tick")
+          : xetraExplicitClosed
+            ? "--:--"
           : xetraPostClose
             ? "--:--"
           : xetraPreOpen

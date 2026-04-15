@@ -291,7 +291,7 @@ Die vier Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Compani
 - `Noah US Status`: zeigt, ob Noah im US-Handel ist oder wie lange es noch bis zum Start dauert
 - `Noah US Cycle`: zeigt letzten US-Zyklus, Trade-Counter und Countdown bis zum naechsten US-Zyklus
 
-Die Bridge zieht dafuer Noah-Daten ueber den vorhandenen `ocvps`-SSH-Zugang. Fuer Xetra wird auf die Runtime-Registry zurueckgefallen, falls der deployte Companion-API-Prozess den Xetra-Endpunkt noch nicht ausliefert.
+Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen.
 
 ## Ueber die Bridge starten
 
