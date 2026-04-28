@@ -1369,6 +1369,24 @@ function isFutureTimestamp(value) {
   return !Number.isNaN(parsed) && parsed > Date.now();
 }
 
+function normalizeFutureCycleTimestamp(value, intervalMinutes) {
+  const parsed = Date.parse(String(value || ""));
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  const now = Date.now();
+  if (parsed > now) {
+    return new Date(parsed).toISOString();
+  }
+  const interval = Number(intervalMinutes);
+  if (!Number.isFinite(interval) || interval <= 0) {
+    return null;
+  }
+  const intervalMs = Math.round(interval * 60_000);
+  const steps = Math.floor((now - parsed) / intervalMs) + 1;
+  return new Date(parsed + steps * intervalMs).toISOString();
+}
+
 function formatCountdown(target) {
   if (!target) {
     return "--:--";
@@ -1525,6 +1543,10 @@ function compactCodes(values, fallback = "-") {
   return items.length ? items.join(" ") : fallback;
 }
 
+function blankTileLine() {
+  return " ";
+}
+
 function pnlStatus(value, degraded) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) {
@@ -1600,6 +1622,9 @@ function normalizeNoahMarketKey(value) {
   if (raw === "xetra" || raw === "eu_multi" || raw === "eu") {
     return "xetra";
   }
+  if (raw === "japan_equities" || raw === "japan" || raw === "tse") {
+    return "japan_equities";
+  }
   if (raw === "index_futures" || raw === "futures" || raw === "global_futures") {
     return "index_futures";
   }
@@ -1611,6 +1636,9 @@ function noahMarketLabel(value) {
   if (market === "xetra") {
     return "EU";
   }
+  if (market === "japan_equities") {
+    return "JP";
+  }
   if (market === "index_futures") {
     return "IF";
   }
@@ -1618,7 +1646,8 @@ function noahMarketLabel(value) {
 }
 
 function noahProductLabel(value) {
-  return normalizeNoahMarketKey(value) === "index_futures" ? "FUT" : "EQ";
+  const market = normalizeNoahMarketKey(value);
+  return market === "index_futures" ? "FUT" : "EQ";
 }
 
 function shortCycleMode(value) {
@@ -1708,7 +1737,7 @@ function buildNoahSummary(statusCard, observerCard) {
   };
 }
 
-function buildNoahSummaryFromObserverLive(payload) {
+function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
   const markets = payload?.markets && typeof payload.markets === "object" ? payload.markets : {};
   const sessions = payload?.sessions && typeof payload.sessions === "object" ? payload.sessions : {};
   const fallbackNextCycle = marketKey => {
@@ -1724,23 +1753,35 @@ function buildNoahSummaryFromObserverLive(payload) {
   const rows = Object.keys(markets).map(key => {
     const market = markets[key] || {};
     const session = sessions[key] || {};
+    const status = statusByMarket[key] || {};
     const runtimeMode = market.runtime_mode || {};
     const tradeActivity = market.trade_activity || {};
     const portfolio = market.portfolio || {};
     const marketKey = market.market_registry?.market_key || key;
     const sessionOpen =
-      String(session.market_session_status || "").trim().toLowerCase() === "open" ||
-      Boolean(market.market_open);
+      String(status.market_session_status || session.market_session_status || "").trim().toLowerCase() === "open" ||
+      Boolean(status.market_open ?? market.market_open);
     const rawNextCycleAt =
+      status.next_regular_cycle_ts_et ||
+      status.next_cycle_ts_et ||
       runtimeMode.next_regular_cycle_ts_et ||
       session.next_cycle_ts_et ||
       payload?.next_cycle_ts_et;
-    const hasLiveCycle = isFutureTimestamp(rawNextCycleAt);
-    const trading = sessionOpen && hasLiveCycle;
+    const cycleIntervalMinutes =
+      Number(
+        status.cycle_interval_minutes ||
+        runtimeMode.cycle_interval_minutes ||
+        runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes ||
+        0
+      ) || 0;
     const nextCycleAt =
       !sessionOpen && !isFutureTimestamp(rawNextCycleAt)
         ? fallbackNextCycle(marketKey)
-        : rawNextCycleAt;
+        : normalizeFutureCycleTimestamp(rawNextCycleAt, cycleIntervalMinutes) || rawNextCycleAt;
+    const hasLiveCycle = isFutureTimestamp(nextCycleAt);
+    const trading =
+      sessionOpen &&
+      (hasLiveCycle || String(runtimeMode.runtime_mode || status.runtime_mode || "").trim().toUpperCase() === "REGULAR_CYCLE");
     return {
       key: normalizeNoahMarketKey(marketKey),
       label: noahMarketLabel(marketKey),
@@ -1821,7 +1862,21 @@ async function probeNoahMonitor() {
       createNoahMonitorUrl(baseUrl, "/api/v1/observer/live", "combined"),
       { timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000) }
     );
-    const summary = buildNoahSummaryFromObserverLive(observerLive);
+    const marketKeys = Object.keys(observerLive?.markets || {});
+    const statusEntries = await Promise.all(
+      marketKeys.map(async marketKey => {
+        try {
+          const status = await fetchJson(
+            createNoahMonitorUrl(baseUrl, "/api/v1/status/current", marketKey),
+            { timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000) }
+          );
+          return [marketKey, status];
+        } catch {
+          return [marketKey, null];
+        }
+      })
+    );
+    const summary = buildNoahSummaryFromObserverLive(observerLive, Object.fromEntries(statusEntries));
     if (!summary.live?.configured_markets?.length) {
       return makeNoahProbeFallback("Noah API lieferte keine Markt-Daten");
     }
@@ -1920,9 +1975,9 @@ function buildNoahTiles(summary) {
         key: "live_markets",
         label: "Live Markt",
         status: "error",
-        line1: "Live -",
-        line2: "Prod -",
-        footer: "Trade -",
+        line1: "-",
+        line2: blankTileLine(),
+        footer: blankTileLine(),
         updatedAt
       }
     };
@@ -1939,18 +1994,15 @@ function buildNoahTiles(summary) {
   const cycleHasFutureTimer = isFutureTimestamp(cycle.next_cycle_at);
   const cycleStatus = cycle.trading ? (cycleHasFutureTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
-  const liveProducts = compactCodes(live.trading_products || live.products);
-  const tradingMarkets = compactCodes(live.trading_markets);
-  const tradingProducts = compactCodes(live.trading_products);
 
   const tiles = {
     cycle: {
       key: "cycle",
       label: "Noah Zyklus",
       status: cycleStatus,
-      line1: `${String(cycle.market_label || "NO").trim()} ${String(cycle.mode_label || "Warte").trim()}`.trim(),
-      line2: cycleHasFutureTimer ? formatCountdown(cycle.next_cycle_at) : "--:--",
-      footer: cycle.trading ? (cycleHasFutureTimer ? "Naechster" : "Kein Timer") : "Warte",
+      line1: cycleHasFutureTimer ? formatCountdown(cycle.next_cycle_at) : "--:--",
+      line2: blankTileLine(),
+      footer: cycleHasFutureTimer ? "Naechste" : blankTileLine(),
       updatedAt
     },
     weekly_pnl: {
@@ -1984,9 +2036,9 @@ function buildNoahTiles(summary) {
       key: "live_markets",
       label: "Live Markt",
       status: degraded && liveTileStatus(summary) !== "ok" ? "warn" : liveTileStatus(summary),
-      line1: `Live ${liveMarkets}`,
-      line2: "",
-      footer: "",
+      line1: liveMarkets,
+      line2: blankTileLine(),
+      footer: blankTileLine(),
       updatedAt
     }
   };
