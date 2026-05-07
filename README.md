@@ -129,6 +129,7 @@ Ohne Admin-Rechte richtet `service:install` automatisch den bestmoeglichen Fallb
 
 - Task: `Codex Stream Deck Monitor Bridge (Logon)`
 - plus versteckter Launcher im Startup-Ordner
+- plus `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` fuer einen zweiten Benutzer-Logon-Pfad
 - Verhalten: startet beim naechsten Benutzer-Login
 
 Wenn du bootfesten Hintergrundbetrieb willst, fuehre denselben Befehl einmal in einer als Administrator gestarteten PowerShell aus.

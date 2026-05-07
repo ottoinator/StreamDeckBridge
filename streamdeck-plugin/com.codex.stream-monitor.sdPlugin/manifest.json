@@ -2,7 +2,7 @@
   "Name": "Codex Monitor",
   "Version": "0.1.0.0",
   "Author": "OpenAI Codex",
-  "Description": "Monitors four Codex jobs via a local bridge and displays clear status colors on the Stream Deck.",
+  "Description": "Monitors Codex jobs and Noah runtime tiles via a local bridge and displays clear status colors on the Stream Deck.",
   "Category": "Codex",
   "CategoryIcon": "imgs/plugin/category-icon",
   "Icon": "imgs/plugin/marketplace",
@@ -114,10 +114,10 @@
       ]
     },
     {
-      "Name": "Noah Xetra Status",
-      "UUID": "com.codex.stream-monitor.noah.xetra-status",
+      "Name": "Noah Cycle",
+      "UUID": "com.codex.stream-monitor.noah.cycle",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows whether the Xetra smoke test is running and whether trades happened.",
+      "Tooltip": "Shows the current Noah cycle and the countdown to the next cycle.",
       "Controllers": [
         "Keypad"
       ],
@@ -129,10 +129,10 @@
       ]
     },
     {
-      "Name": "Noah Xetra Cycle",
-      "UUID": "com.codex.stream-monitor.noah.xetra-cycle",
+      "Name": "Noah Weekly PnL",
+      "UUID": "com.codex.stream-monitor.noah.weekly-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the latest Xetra smoke cycle, countdown and trade count.",
+      "Tooltip": "Shows the current weekly Noah PnL.",
       "Controllers": [
         "Keypad"
       ],
@@ -144,10 +144,10 @@
       ]
     },
     {
-      "Name": "Noah US Status",
-      "UUID": "com.codex.stream-monitor.noah.us-status",
+      "Name": "Noah Daily PnL",
+      "UUID": "com.codex.stream-monitor.noah.daily-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows whether Noah is in the US trading session or counting down to it.",
+      "Tooltip": "Shows the current daily Noah PnL.",
       "Controllers": [
         "Keypad"
       ],
@@ -159,10 +159,25 @@
       ]
     },
     {
-      "Name": "Noah US Cycle",
-      "UUID": "com.codex.stream-monitor.noah.us-cycle",
+      "Name": "Noah Trades Today",
+      "UUID": "com.codex.stream-monitor.noah.trades-today",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the latest US cycle, countdown and trade counter.",
+      "Tooltip": "Shows how many trades are open and closed today.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/slot",
+          "TitleAlignment": "middle"
+        }
+      ]
+    },
+    {
+      "Name": "Noah Live Markets",
+      "UUID": "com.codex.stream-monitor.noah.live-markets",
+      "Icon": "imgs/actions/slot",
+      "Tooltip": "Shows which markets and product families are live and trading.",
       "Controllers": [
         "Keypad"
       ],
