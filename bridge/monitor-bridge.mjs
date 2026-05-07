@@ -1387,6 +1387,74 @@ function normalizeFutureCycleTimestamp(value, intervalMinutes) {
   return new Date(parsed + steps * intervalMs).toISOString();
 }
 
+function finiteNumber(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function nonZeroNumber(value, epsilon = 0.005) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && Math.abs(numeric) > epsilon ? numeric : null;
+}
+
+function portfolioWeekPnlEur(portfolio) {
+  const explicit = nonZeroNumber(portfolio?.weekly_pnl_eur);
+  if (explicit !== null) {
+    return explicit;
+  }
+  const current = finiteNumber(portfolio?.current_portfolio_value_eur, NaN);
+  const weekStart = finiteNumber(portfolio?.week_start_value_eur, NaN);
+  if (Number.isFinite(current) && Number.isFinite(weekStart)) {
+    const delta = nonZeroNumber(current - weekStart);
+    if (delta !== null) {
+      return delta;
+    }
+  }
+  const realized = finiteNumber(portfolio?.realized_pnl_eur_total, NaN);
+  const unrealized = finiteNumber(portfolio?.unrealized_pnl_eur_total, 0);
+  if (Number.isFinite(realized)) {
+    const total = nonZeroNumber(realized + unrealized);
+    if (total !== null) {
+      return total;
+    }
+  }
+  return finiteNumber(portfolio?.weekly_pnl_eur, 0);
+}
+
+function portfolioWeekPnlPct(portfolio, pnlEur) {
+  const explicit = nonZeroNumber(portfolio?.weekly_pnl_pct, 0.0005);
+  if (explicit !== null) {
+    return explicit;
+  }
+  const weekStart = finiteNumber(portfolio?.week_start_value_eur, NaN);
+  if (Number.isFinite(weekStart) && Math.abs(weekStart) > 0.005) {
+    return (finiteNumber(pnlEur, 0) / weekStart) * 100;
+  }
+  return finiteNumber(portfolio?.weekly_pnl_pct, 0);
+}
+
+function chooseNoahCycleTimestamp(status, runtimeMode, topStatus = {}, isActiveMarket = false) {
+  const intervalMinutes =
+    finiteNumber(status?.cycle_interval_minutes, 0) ||
+    finiteNumber(topStatus?.cycle_interval_minutes, 0) ||
+    finiteNumber(runtimeMode?.cycle_interval_minutes, 0) ||
+    finiteNumber(runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes, 0);
+  const candidates = [
+    status?.next_cycle_ts_et,
+    isActiveMarket ? topStatus?.next_cycle_ts_et : null,
+    runtimeMode?.next_cycle_ts_et,
+    status?.next_regular_cycle_ts_et,
+    runtimeMode?.next_regular_cycle_ts_et
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeFutureCycleTimestamp(candidate, intervalMinutes);
+    if (normalized && isFutureTimestamp(normalized)) {
+      return normalized;
+    }
+  }
+  return candidates.find(Boolean) || null;
+}
+
 function formatCountdown(target) {
   if (!target) {
     return "--:--";
@@ -1670,6 +1738,7 @@ function buildNoahSummary(statusCard, observerCard) {
   const statusMarkets = statusCard?.markets && typeof statusCard.markets === "object" ? statusCard.markets : {};
   const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
   const marketKeys = Array.from(new Set([...Object.keys(statusMarkets), ...Object.keys(observerMarkets)]));
+  const activeMarketKey = normalizeNoahMarketKey(statusCard?.active_market || observerCard?.active_market);
   const marketRows = marketKeys.map(key => {
     const normalizedKey = normalizeNoahMarketKey(key);
     const status = statusMarkets[key] || {};
@@ -1678,23 +1747,26 @@ function buildNoahSummary(statusCard, observerCard) {
     const portfolio = observer.portfolio || {};
     const runtimeMode = status.runtime_mode || {};
     const sessionStatus = String(status.market_session_status || status.active_market_status || "").trim().toLowerCase();
+    const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizedKey,
       label: noahMarketLabel(normalizedKey),
       product: noahProductLabel(normalizedKey),
       trading: sessionStatus === "open",
-      nextCycleAt: status.next_regular_cycle_ts_et || status.next_cycle_ts_et || runtimeMode.next_regular_cycle_ts_et || null,
+      nextCycleAt: chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
       modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || status.posture?.session_state || sessionStatus),
       openTrades: Number(tradeActivity.open_positions || 0),
       closedTrades: Number(tradeActivity.closed_trades || 0),
       dailyPnlEur: Number(portfolio.daily_pnl_eur || 0),
       dailyPnlPct: Number(portfolio.daily_pnl_pct || 0),
-      weeklyPnlEur: Number(portfolio.weekly_pnl_eur || 0),
-      weeklyPnlPct: Number(portfolio.weekly_pnl_pct || 0)
+      weeklyPnlEur,
+      weeklyPnlPct: portfolioWeekPnlPct(portfolio, weeklyPnlEur)
     };
   });
 
   const activeCycleRow =
+    marketRows.find(row => row.key === activeMarketKey && row.nextCycleAt) ||
+    marketRows.find(row => row.trading && row.nextCycleAt) ||
     marketRows.find(row => row.trading) ||
     marketRows
       .filter(row => row.nextCycleAt)
@@ -1703,6 +1775,18 @@ function buildNoahSummary(statusCard, observerCard) {
     null;
 
   const combinedPortfolio = observerCard?.portfolio || {};
+  let weeklyEur = portfolioWeekPnlEur(combinedPortfolio);
+  if (!nonZeroNumber(weeklyEur)) {
+    const activeWeekly = marketRows.find(row => row.key === activeMarketKey && nonZeroNumber(row.weeklyPnlEur));
+    const tradingWeekly = marketRows.find(row => row.trading && nonZeroNumber(row.weeklyPnlEur));
+    weeklyEur = activeWeekly?.weeklyPnlEur ?? tradingWeekly?.weeklyPnlEur ?? marketRows.reduce((sum, row) => sum + row.weeklyPnlEur, 0);
+  }
+  let weeklyPct = portfolioWeekPnlPct(combinedPortfolio, weeklyEur);
+  if (!nonZeroNumber(weeklyPct, 0.0005)) {
+    const activeWeekly = marketRows.find(row => row.key === activeMarketKey && nonZeroNumber(row.weeklyPnlPct, 0.0005));
+    const tradingWeekly = marketRows.find(row => row.trading && nonZeroNumber(row.weeklyPnlPct, 0.0005));
+    weeklyPct = activeWeekly?.weeklyPnlPct ?? tradingWeekly?.weeklyPnlPct ?? marketRows.reduce((sum, row) => sum + row.weeklyPnlPct, 0);
+  }
   const configuredMarkets = marketRows.map(row => row.label);
   const configuredProducts = Array.from(new Set(marketRows.map(row => row.product)));
   const tradingMarkets = marketRows.filter(row => row.trading).map(row => row.label);
@@ -1721,8 +1805,8 @@ function buildNoahSummary(statusCard, observerCard) {
     pnl: {
       daily_eur: Number(combinedPortfolio.daily_pnl_eur || 0),
       daily_pct: Number(combinedPortfolio.daily_pnl_pct || 0),
-      weekly_eur: Number(combinedPortfolio.weekly_pnl_eur || 0),
-      weekly_pct: Number(combinedPortfolio.weekly_pnl_pct || 0)
+      weekly_eur: weeklyEur,
+      weekly_pct: weeklyPct
     },
     trades_today: {
       open: marketRows.reduce((sum, row) => sum + Math.max(0, row.openTrades || 0), 0),
@@ -1782,6 +1866,7 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
     const trading =
       sessionOpen &&
       (hasLiveCycle || String(runtimeMode.runtime_mode || status.runtime_mode || "").trim().toUpperCase() === "REGULAR_CYCLE");
+    const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizeNoahMarketKey(marketKey),
       label: noahMarketLabel(marketKey),
@@ -1793,8 +1878,8 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
       closedTrades: Number((tradeActivity.counts || tradeActivity).closed_trades || 0),
       dailyPnlEur: Number(portfolio.daily_pnl_eur || 0),
       dailyPnlPct: Number(portfolio.daily_pnl_pct || 0),
-      weeklyPnlEur: Number(portfolio.weekly_pnl_eur || 0),
-      weeklyPnlPct: Number(portfolio.weekly_pnl_pct || 0),
+      weeklyPnlEur,
+      weeklyPnlPct: portfolioWeekPnlPct(portfolio, weeklyPnlEur),
       sessionOpen,
       hasLiveCycle
     };
@@ -1811,6 +1896,8 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
 
   const combinedPortfolio = payload?.portfolio || {};
   const combinedTradeCounts = payload?.trade_activity?.counts || payload?.trade_activity || {};
+  const weeklyEur = portfolioWeekPnlEur(combinedPortfolio) || rows.reduce((sum, row) => sum + row.weeklyPnlEur, 0);
+  const weeklyPct = portfolioWeekPnlPct(combinedPortfolio, weeklyEur) || rows.reduce((sum, row) => sum + row.weeklyPnlPct, 0);
 
   return {
     checked_at: payload?.generated_at_utc || nowIso(),
@@ -1825,8 +1912,8 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
     pnl: {
       daily_eur: Number(combinedPortfolio.daily_pnl_eur || rows.reduce((sum, row) => sum + row.dailyPnlEur, 0)),
       daily_pct: Number(combinedPortfolio.daily_pnl_pct || rows.reduce((sum, row) => sum + row.dailyPnlPct, 0)),
-      weekly_eur: Number(combinedPortfolio.weekly_pnl_eur || rows.reduce((sum, row) => sum + row.weeklyPnlEur, 0)),
-      weekly_pct: Number(combinedPortfolio.weekly_pnl_pct || rows.reduce((sum, row) => sum + row.weeklyPnlPct, 0))
+      weekly_eur: weeklyEur,
+      weekly_pct: weeklyPct
     },
     trades_today: {
       open: Number(combinedTradeCounts.open_positions || rows.reduce((sum, row) => sum + row.openTrades, 0)),
@@ -1858,9 +1945,23 @@ async function probeNoahMonitor() {
     if (!baseUrl) {
       return makeNoahProbeFallback("Noah API Basis-URL fehlt");
     }
+    const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
+    const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
+    try {
+      const [statusCard, observerCard] = await Promise.all([
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", "combined"), { headers, timeoutMs }),
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "combined"), { headers, timeoutMs })
+      ]);
+      const summary = buildNoahSummary(statusCard, observerCard);
+      if (summary.live?.configured_markets?.length) {
+        return summary;
+      }
+    } catch {
+      // Fall back to the legacy observer/live path below.
+    }
     const observerLive = await fetchJson(
       createNoahMonitorUrl(baseUrl, "/api/v1/observer/live", "combined"),
-      { timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000) }
+      { headers, timeoutMs }
     );
     const marketKeys = Object.keys(observerLive?.markets || {});
     const statusEntries = await Promise.all(
@@ -1868,7 +1969,7 @@ async function probeNoahMonitor() {
         try {
           const status = await fetchJson(
             createNoahMonitorUrl(baseUrl, "/api/v1/status/current", marketKey),
-            { timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000) }
+            { headers, timeoutMs }
           );
           return [marketKey, status];
         } catch {
