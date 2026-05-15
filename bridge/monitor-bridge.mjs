@@ -1,13 +1,21 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 
 const PORT = Number(process.env.CODEX_MONITOR_PORT || 4567);
 const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
-const DATA_DIR = process.env.CODEX_MONITOR_DATA_DIR || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
+
+function getDefaultDataDir() {
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "CodexStreamDeckMonitor");
+  }
+  return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
+}
+
+const DATA_DIR = process.env.CODEX_MONITOR_DATA_DIR || getDefaultDataDir();
 const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
@@ -30,6 +38,8 @@ const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
+const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
+const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
 const stateStreamClients = new Set();
 function parseOptionalNumber(value, fallback = undefined) {
   const parsed = Number(value);
@@ -50,44 +60,138 @@ function buildAgentRemoteHeaders(prefix) {
   return headers;
 }
 
-function createAgentRemoteConfig(prefix, sshHostEnv, defaultHost, commandEnv, defaultCommand) {
-  const statusUrl = process.env[`${prefix}_STATUS_URL`];
+const LEGACY_NOAH_VPS_STATUS_COMMAND = (
+  "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
+);
+
+const LEGACY_CARMEN_VPS_STATUS_COMMAND = (
+  "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
+);
+
+const DEFAULT_CARMEN_LOCAL_STATUS_COMMAND =
+  "docker exec carmen-runtime sh -lc 'cd /root/.openclaw/workspace && python3 integrations/whatsapp/openai_activity.py'";
+
+function buildUrl(baseUrl, pathname) {
+  const url = new URL(baseUrl);
+  url.pathname = pathname;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function createNoahRemoteConfig() {
+  const statusUrl = process.env.CODEX_MONITOR_NOAH_STATUS_URL;
   if (statusUrl) {
     return {
       kind: "http-json",
       url: statusUrl,
-      headers: buildAgentRemoteHeaders(prefix),
-      timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 4_000)
+      headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"),
+      timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 4_000)
+    };
+  }
+
+  const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 8_000);
+  const sshHost = process.env.CODEX_MONITOR_NOAH_SSH_HOST;
+  if (sshHost || process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND) {
+    return {
+      kind: "ssh-json",
+      host: sshHost || "ocvps",
+      command: process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND || LEGACY_NOAH_VPS_STATUS_COMMAND,
+      timeoutMs
+    };
+  }
+
+  return {
+    kind: "http-json",
+    url: buildUrl(process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL || DEFAULT_NOAH_MONITOR_BASE_URL, "/api/v1/status/openai-activity"),
+    headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"),
+    timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 4_000)
+  };
+}
+
+function formatRuntimeAge(value) {
+  const timestamp = Date.parse(String(value || ""));
+  if (Number.isNaN(timestamp)) {
+    return "";
+  }
+  return formatAgeCompact(Date.now() - timestamp);
+}
+
+function makeNoahRuntimeProbe(summary) {
+  if (!summary || summary.error) {
+    return makeProbeResult("offline", `Noah offline: ${summary?.error || "Keine Monitor-Daten"}`);
+  }
+  const cycle = summary.cycle || {};
+  const pnl = summary.pnl || {};
+  const trades = summary.trades_today || {};
+  const live = summary.live || {};
+  const tradingMarkets = Array.isArray(live.trading_markets) ? live.trading_markets : [];
+  const configuredMarkets = Array.isArray(live.configured_markets) ? live.configured_markets : [];
+  const marketLabel = cycle.market_label || tradingMarkets[0] || configuredMarkets[0] || "Noah";
+  const modeLabel = cycle.mode_label || (cycle.trading ? "Live" : "Idle");
+  const status = summary.stale_reason ? "attention" : "online";
+  const checkedAge = formatRuntimeAge(summary.checked_at);
+  const detail = cycle.trading
+    ? `Runtime ${marketLabel} ${modeLabel}`.trim()
+    : `Runtime ${marketLabel} idle`.trim();
+  const activityMetric = [
+    cycle.next_cycle_at || "",
+    cycle.trading ? "open" : "closed",
+    Math.round(Number(pnl.daily_eur || 0) * 100),
+    Math.round(Number(pnl.weekly_eur || 0) * 100),
+    Number(trades.open || 0),
+    Number(trades.closed || 0)
+  ].join(":");
+  return makeProbeResult(status, checkedAge ? `${detail} (${checkedAge})` : detail, {
+    activityMetric,
+    allowRemoteActivity: true
+  });
+}
+
+function createCarmenRemoteConfig() {
+  const statusUrl = process.env.CODEX_MONITOR_CARMEN_STATUS_URL;
+  if (statusUrl) {
+    return {
+      kind: "http-json",
+      url: statusUrl,
+      headers: buildAgentRemoteHeaders("CODEX_MONITOR_CARMEN"),
+      timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_CARMEN_STATUS_TIMEOUT_MS, 4_000)
+    };
+  }
+
+  const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_CARMEN_STATUS_TIMEOUT_MS, 8_000);
+  const sshHost = process.env.CODEX_MONITOR_CARMEN_SSH_HOST;
+  if (sshHost) {
+    return {
+      kind: "ssh-json",
+      host: sshHost,
+      command: process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND || LEGACY_CARMEN_VPS_STATUS_COMMAND,
+      timeoutMs
+    };
+  }
+
+  if (process.platform === "darwin" || process.env.CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND) {
+    return {
+      kind: "local-json",
+      command:
+        process.env.CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND ||
+        process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND ||
+        DEFAULT_CARMEN_LOCAL_STATUS_COMMAND,
+      timeoutMs
     };
   }
 
   return {
     kind: "ssh-json",
-    host: process.env[sshHostEnv] || defaultHost,
-    command: process.env[commandEnv] || defaultCommand,
-    timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 8_000)
+    host: "carmen-vps",
+    command: process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND || LEGACY_CARMEN_VPS_STATUS_COMMAND,
+    timeoutMs
   };
 }
 
 const AGENT_REMOTE_DEFAULTS = {
-  noah: createAgentRemoteConfig(
-    "CODEX_MONITOR_NOAH",
-    "CODEX_MONITOR_NOAH_SSH_HOST",
-    "ocvps",
-    "CODEX_MONITOR_NOAH_STATUS_COMMAND",
-    (
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
-    )
-  ),
-  carmen: createAgentRemoteConfig(
-    "CODEX_MONITOR_CARMEN",
-    "CODEX_MONITOR_CARMEN_SSH_HOST",
-    "carmen-vps",
-    "CODEX_MONITOR_CARMEN_STATUS_COMMAND",
-    (
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
-    )
-  )
+  noah: createNoahRemoteConfig(),
+  carmen: createCarmenRemoteConfig()
 };
 const agentProbeCache = new Map();
 const agentProbeInflight = new Map();
@@ -812,6 +916,197 @@ function overlayDiscoveredProcesses(slots, processes) {
   });
 }
 
+function codexSessionsRoot() {
+  return path.join(os.homedir(), ".codex", "sessions");
+}
+
+async function listCodexSessionFiles(root = codexSessionsRoot()) {
+  const files = [];
+  async function walk(current) {
+    let entries = [];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await Promise.all(entries.map(async entry => {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        return;
+      }
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        try {
+          const fileStat = await stat(fullPath);
+          files.push({ path: fullPath, mtimeMs: fileStat.mtimeMs });
+        } catch {
+        }
+      }
+    }));
+  }
+  await walk(root);
+  return files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+}
+
+function threadIdFromSessionPath(filePath) {
+  const match = path.basename(filePath).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
+  return match ? match[1] : "";
+}
+
+function parseSessionWorkdir(entry) {
+  if (entry?.type !== "response_item" || entry.payload?.type !== "function_call") {
+    return "";
+  }
+  const raw = String(entry.payload.arguments || "");
+  if (!raw) {
+    return "";
+  }
+  try {
+    const args = JSON.parse(raw);
+    return String(args.workdir || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function parseCodexSessionState(raw, filePath, mtimeMs) {
+  const threadId = threadIdFromSessionPath(filePath);
+  if (!threadId) {
+    return null;
+  }
+
+  const lines = raw.trimEnd().split(/\r?\n/).slice(-400);
+  let lastUserMessageAt = null;
+  let lastFinalAnswerAt = null;
+  let lastTaskCompleteAt = null;
+  let lastActivityAt = mtimeMs;
+  let latestWorkdir = "";
+  let latestCommentary = "";
+
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const timestamp = Date.parse(String(entry.timestamp || ""));
+    if (!Number.isNaN(timestamp)) {
+      lastActivityAt = Math.max(lastActivityAt, timestamp);
+    }
+    const workdir = parseSessionWorkdir(entry);
+    if (workdir) {
+      latestWorkdir = workdir;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "user_message") {
+      lastUserMessageAt = Math.max(lastUserMessageAt || 0, timestamp || 0);
+      continue;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "task_complete") {
+      lastTaskCompleteAt = Math.max(lastTaskCompleteAt || 0, timestamp || 0);
+      continue;
+    }
+    if (
+      entry.type === "response_item" &&
+      entry.payload?.type === "message" &&
+      entry.payload?.role === "assistant" &&
+      entry.payload?.phase === "final_answer"
+    ) {
+      lastFinalAnswerAt = Math.max(lastFinalAnswerAt || 0, timestamp || 0);
+      continue;
+    }
+    if (
+      entry.type === "response_item" &&
+      entry.payload?.type === "message" &&
+      entry.payload?.phase === "commentary" &&
+      Array.isArray(entry.payload.content)
+    ) {
+      const text = entry.payload.content
+        .map(item => item?.text || "")
+        .join(" ")
+        .trim();
+      if (text) {
+        latestCommentary = text;
+      }
+    }
+  }
+
+  const lastDoneAt = Math.max(lastFinalAnswerAt || 0, lastTaskCompleteAt || 0);
+  if (!lastUserMessageAt || lastDoneAt > lastUserMessageAt) {
+    return null;
+  }
+  if (Date.now() - lastActivityAt > CODEX_SESSION_AUTODETECT_WINDOW_MS) {
+    return null;
+  }
+
+  return {
+    threadId,
+    label: latestWorkdir ? path.basename(latestWorkdir) : `Chat ${getShortThreadToken(threadId)}`,
+    status: "running",
+    detail: latestCommentary ? latestCommentary.slice(0, 80) : "Codex arbeitet",
+    updatedAt: new Date(lastActivityAt).toISOString(),
+    startedAt: lastUserMessageAt ? new Date(lastUserMessageAt).toISOString() : new Date(lastActivityAt).toISOString(),
+    heartbeatAt: new Date(lastActivityAt).toISOString(),
+    finishedAt: null,
+    exitCode: null,
+    source: "codex-session"
+  };
+}
+
+async function discoverActiveCodexSessions() {
+  const files = (await listCodexSessionFiles()).slice(0, 30);
+  const sessions = [];
+  for (const file of files) {
+    try {
+      const raw = await readFile(file.path, "utf8");
+      const state = parseCodexSessionState(raw, file.path, file.mtimeMs);
+      if (state) {
+        sessions.push(state);
+      }
+    } catch {
+    }
+  }
+  return sessions.sort((left, right) => {
+    const leftStarted = Date.parse(left.startedAt || left.updatedAt || nowIso());
+    const rightStarted = Date.parse(right.startedAt || right.updatedAt || nowIso());
+    if (leftStarted !== rightStarted) {
+      return leftStarted - rightStarted;
+    }
+    return left.threadId.localeCompare(right.threadId);
+  });
+}
+
+function overlayAutodetectedSessions(slots, explicitThreads, discoveredSessions) {
+  const explicitThreadIds = new Set(explicitThreads.map(thread => thread.threadId));
+  const usedSlots = new Set(
+    slots
+      .filter(slot => slot.status !== "idle" || slot.source === "codex-app")
+      .map(slot => slot.slot)
+  );
+  const freeSlots = [1, 2, 3, 4].filter(slot => !usedSlots.has(slot));
+  const candidates = discoveredSessions.filter(candidate => !explicitThreadIds.has(candidate.threadId));
+  let candidateIndex = 0;
+
+  return slots.map(slot => {
+    if (usedSlots.has(slot.slot)) {
+      return slot;
+    }
+    if (!freeSlots.includes(slot.slot)) {
+      return slot;
+    }
+    const session = candidates[candidateIndex];
+    if (!session) {
+      return slot;
+    }
+    candidateIndex += 1;
+    return {
+      ...slot,
+      ...threadToSlotState({ ...session, slot: slot.slot }, {}, session.label),
+      autodetected: true
+    };
+  });
+}
+
 async function loadEffectiveSlots() {
   const storedSlots = withHeartbeatTimeout(await readSlots());
   const cleanedSlots = storedSlots.map(slot => {
@@ -835,11 +1130,16 @@ async function loadEffectiveSlots() {
   const explicitThreads = await loadExplicitThreads();
   const explicitThreadSlots = buildExplicitThreadSlotStates(explicitThreads, threadNames);
   const withExplicitThreads = overlayExplicitThreads(cleanedSlots, explicitThreadSlots);
+  const withAutodetectedSessions = overlayAutodetectedSessions(
+    withExplicitThreads,
+    explicitThreads,
+    await discoverActiveCodexSessions()
+  );
   if (!ENABLE_PROCESS_AUTODETECT) {
-    return withExplicitThreads;
+    return withAutodetectedSessions;
   }
   const discoveredProcesses = await discoverCodexProcesses();
-  return overlayDiscoveredProcesses(withExplicitThreads, discoveredProcesses);
+  return overlayDiscoveredProcesses(withAutodetectedSessions, discoveredProcesses);
 }
 
 async function loadEffectiveAgents() {
@@ -963,12 +1263,29 @@ async function runSshJson(host, command, timeout = 8_000) {
   return output ? JSON.parse(output) : {};
 }
 
+async function runLocalJson(command, timeout = 8_000) {
+  const { stdout } = await execFileAsync(
+    "sh",
+    ["-lc", command],
+    {
+      timeout,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    }
+  );
+  const output = String(stdout || "").trim();
+  return output ? JSON.parse(output) : {};
+}
+
 async function runRemoteProbe(config) {
   if (config?.kind === "http-json") {
     return fetchJson(config.url, {
       headers: config.headers,
       timeoutMs: config.timeoutMs
     });
+  }
+  if (config?.kind === "local-json") {
+    return runLocalJson(config.command, config.timeoutMs);
   }
   return runSshJson(config.host, config.command, config.timeoutMs);
 }
@@ -1097,22 +1414,26 @@ function deriveOpenAiActivity(payload) {
     "activity.recentActivity",
     "openai.recentActivity"
   ]);
+  const hasWindowTokens = Number.isFinite(windowTokens);
+  const hasOpenAiPayload = Boolean(payload.openai || payload.activity || payload.usage || payload.tokens || hasWindowTokens || Number.isFinite(totalTokens));
   const activityMetric =
-    firstStringValue(payload, ["activityMetric", "activity.metric", "openai.activityMetric"]) ||
-    (Number.isFinite(totalTokens)
-      ? `tokens:${Math.trunc(totalTokens)}`
-      : Number.isFinite(windowTokens)
+    (hasWindowTokens
         ? `window:${Math.trunc(windowTokens)}:${lastActivityAt || ""}`
-        : lastActivityAt
-          ? `activity:${lastActivityAt}`
-          : undefined);
+        : firstStringValue(payload, ["activityMetric", "activity.metric", "openai.activityMetric"]) ||
+          (Number.isFinite(totalTokens)
+            ? `tokens:${Math.trunc(totalTokens)}`
+            : lastActivityAt
+              ? `activity:${lastActivityAt}`
+              : undefined));
   const detail =
-    firstStringValue(payload, ["detail", "activity.detail", "openai.detail"]) ||
-    (Number.isFinite(windowTokens) && windowTokens > 0
+    (hasWindowTokens
       ? `OpenAI ${formatTokenCount(windowTokens)} Tok/${windowMinutes}m`
-      : Number.isFinite(totalTokens)
-        ? `OpenAI ${formatTokenCount(totalTokens)} Tok ges.`
-        : undefined);
+      : hasOpenAiPayload
+        ? `OpenAI 0 Tok/${windowMinutes}m`
+        : firstStringValue(payload, ["detail", "activity.detail", "openai.detail"]) ||
+          (Number.isFinite(totalTokens)
+            ? `OpenAI ${formatTokenCount(totalTokens)} Tok ges.`
+            : undefined));
 
   if (!detail && recentActivity === undefined && activityMetric === undefined) {
     return null;
@@ -1123,7 +1444,7 @@ function deriveOpenAiActivity(payload) {
     recentActivity:
       recentActivity !== undefined
         ? recentActivity
-        : Number.isFinite(windowTokens)
+        : hasWindowTokens
           ? windowTokens > 0
           : lastActivityAt
             ? isRecentIsoTimestamp(lastActivityAt, AGENT_ACTIVITY_WINDOW_MS)
@@ -1155,15 +1476,19 @@ function makeExplicitProbeResult(payload, fallbackStatus, fallbackDetail) {
     return null;
   }
 
-  return makeProbeResult(explicitStatus, explicitDetail || openAiActivity?.detail || fallbackDetail, {
+  return makeProbeResult(explicitStatus, openAiActivity?.detail || explicitDetail || fallbackDetail, {
     recentActivity: explicitRecentActivity ?? openAiActivity?.recentActivity,
-    activityMetric: explicitActivityMetric || openAiActivity?.activityMetric,
+    activityMetric: openAiActivity?.activityMetric || explicitActivityMetric,
     allowRemoteActivity: openAiActivity?.allowRemoteActivity || explicitRecentActivity !== undefined || explicitActivityMetric !== undefined
   });
 }
 
 async function probeNoahRemote() {
   try {
+    const monitorSummary = await getCachedNoahMonitor();
+    if (hasUsableNoahSummary(monitorSummary)) {
+      return makeNoahRuntimeProbe(monitorSummary);
+    }
     const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.noah);
     const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
     if (explicit) {
@@ -1197,7 +1522,7 @@ async function probeNoahRemote() {
 async function probeCarmenRemote() {
   try {
     const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.carmen);
-    const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
+    const explicit = makeExplicitProbeResult(payload, "online", "Carmen erreichbar");
     if (explicit) {
       return explicit;
     }
@@ -1219,7 +1544,7 @@ async function probeCarmenRemote() {
       isRecentUnixTimestamp(latestActivityFileMtime, AGENT_ACTIVITY_WINDOW_MS / 1000);
 
     if (payload?.ok && receiverOk && nodeReady && nodeAuthenticated) {
-      return makeProbeResult("online", `VPS online (${mode})`, {
+      return makeProbeResult("online", `Carmen online (${mode})`, {
         activityMetric: `${lastAcceptedSeq}:${lastProcessedSeq}:${latestSeq}:${latestSessionMtime}:${latestActivityFileMtime}`,
         recentActivity: hasRecentActivity
       });
@@ -1231,7 +1556,7 @@ async function probeCarmenRemote() {
 
     return makeProbeResult("attention", "Carmen meldet Problem");
   } catch (error) {
-    return makeProbeResult("offline", `VPS offline: ${error instanceof Error ? error.message : String(error)}`);
+    return makeProbeResult("offline", `Carmen offline: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1293,6 +1618,7 @@ async function overlayRemoteAgentStates(agents) {
     const remoteActivityEnabled = probe.allowRemoteActivity || ENABLE_REMOTE_AGENT_ACTIVITY;
     const changedActivityMetric =
       remoteActivityEnabled &&
+      probe.recentActivity !== false &&
       probe.activityMetric !== undefined &&
       previous?.activityMetric !== undefined &&
       probe.activityMetric !== previous.activityMetric;
@@ -1663,7 +1989,8 @@ function getNoahMonitorBaseUrl() {
   for (const candidate of [
     process.env.CODEX_MONITOR_NOAH_API_BASE_URL,
     process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL,
-    process.env.CODEX_MONITOR_NOAH_STATUS_URL
+    process.env.CODEX_MONITOR_NOAH_STATUS_URL,
+    DEFAULT_NOAH_MONITOR_BASE_URL
   ]) {
     const raw = String(candidate || "").trim();
     if (!raw) {

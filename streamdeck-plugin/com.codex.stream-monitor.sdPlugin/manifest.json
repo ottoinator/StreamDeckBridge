@@ -3,7 +3,7 @@
   "Version": "0.1.0.0",
   "Author": "OpenAI Codex",
   "Description": "Monitors Codex jobs and Noah runtime tiles via a local bridge and displays clear status colors on the Stream Deck.",
-  "Category": "Codex",
+  "Category": "Codex Monitor",
   "CategoryIcon": "imgs/plugin/category-icon",
   "Icon": "imgs/plugin/marketplace",
   "CodePath": "bin/plugin.js",
@@ -13,6 +13,10 @@
     "MinimumVersion": "6.5"
   },
   "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "13"
+    },
     {
       "Platform": "windows",
       "MinimumVersion": "10"

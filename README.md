@@ -1,15 +1,16 @@
 # Codex Stream Deck Monitor
 
-Lokale Windows-Integration fuer Elgato Stream Deck und Codex.
+Lokale macOS-Integration fuer Elgato Stream Deck und Codex. Die fruehere Windows-Integration bleibt als Legacy-Pfad erhalten.
 
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
 - `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 4 Noah-Monitor-Kacheln fuer Xetra- und US-Betrieb
 
-Fuer Codex-Chats gibt es jetzt zusaetzlich einen expliziten Meldeweg:
+Fuer Codex-Chats gibt es einen expliziten Meldeweg:
 
-- `scripts/codex-bridge-thread.ps1`: registriert den aktuellen Chat ueber `CODEX_THREAD_ID`, sendet Heartbeats und setzt `needs_input`, `done` oder `error`
+- `scripts/codex-bridge-thread.mjs`: registriert den aktuellen Chat ueber `CODEX_THREAD_ID`, sendet Heartbeats und setzt `needs_input`, `done` oder `error`
+- `scripts/codex-bridge-thread.ps1`: Legacy-Variante fuer Windows
 - `plugins/codex-bridge-reporter`: repo-lokales Codex-Plugin mit Skill-Doku fuer denselben Ablauf
 
 ## Statusmodell
@@ -45,98 +46,89 @@ Die Bridge arbeitet jetzt explizit thread-basiert:
 
 Chat registrieren und Heartbeat-Loop starten:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action register -Watch
+```bash
+node scripts/codex-bridge-thread.mjs register --watch
 ```
 
 Zwischenstand senden:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action progress -Detail "Analysiert Bridge"
+```bash
+node scripts/codex-bridge-thread.mjs progress --detail "Analysiert Bridge"
 ```
 
 Rueckfrage signalisieren:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action needs_input -Detail "Architektur offen"
+```bash
+node scripts/codex-bridge-thread.mjs needs_input --detail "Architektur offen"
 ```
 
 Erfolgreich abschliessen:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action done -Detail "Fertig"
+```bash
+node scripts/codex-bridge-thread.mjs done --detail "Fertig"
 ```
 
 Fehler signalisieren:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action error -Detail "Build fehlgeschlagen" -ExitCode 1
+```bash
+node scripts/codex-bridge-thread.mjs error --detail "Build fehlgeschlagen" --exit-code 1
 ```
 
 Thread aus der Bridge entfernen:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action clear
+```bash
+node scripts/codex-bridge-thread.mjs clear
 ```
 
 ## Schnellstart
 
 1. Abhaengigkeiten installieren:
 
-```powershell
+```bash
 npm install
 ```
 
 2. Plugin bauen:
 
-```powershell
+```bash
 npm run build
 ```
 
 3. Plugin in Stream Deck installieren:
 
-```powershell
+```bash
 npm run plugin:install
 ```
 
 4. Bridge starten:
 
-```powershell
+```bash
 npm run bridge
 ```
 
-5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
+5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex Monitor` auf ein Profil ziehen.
    Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4`, `Noah Light`, `Carmen Light`, `Noah Xetra Status`, `Noah Xetra Cycle`, `Noah US Status` und `Noah US Cycle`.
 
-## Autostart ohne Shell-Fenster
+## Autostart auf macOS
 
 Bridge einmal als Hintergrunddienst-Ersatz einrichten:
 
-```powershell
+```bash
 npm run service:install
 ```
 
-Die Installation schreibt zuerst eine feste Runtime-Konfiguration nach `bridge.runtime.json`, damit die Bridge auch beim Systemstart ohne Benutzer-Session dieselben `CODEX_MONITOR_*`-Werte bekommt.
+Die Installation legt einen LaunchAgent unter `~/Library/LaunchAgents/com.codex.streamdeckbridge.plist` an und startet die Bridge im Benutzerkontext. Das passt zur Stream-Deck-App, die ebenfalls als Benutzer-App laeuft.
 
-Wenn PowerShell mit Admin-Rechten laeuft, richtet `service:install` einen echten Start-beim-Boot-Task ein:
+Logs liegen unter:
 
-- Task: `Codex Stream Deck Monitor Bridge`
-- Trigger: Windows-Start
-- Konto: `SYSTEM`
-- Verhalten: laeuft auch ohne Benutzer-Login
-
-Ohne Admin-Rechte richtet `service:install` automatisch den bestmoeglichen Fallback ein:
-
-- Task: `Codex Stream Deck Monitor Bridge (Logon)`
-- plus versteckter Launcher im Startup-Ordner
-- plus `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` fuer einen zweiten Benutzer-Logon-Pfad
-- Verhalten: startet beim naechsten Benutzer-Login
-
-Wenn du bootfesten Hintergrundbetrieb willst, fuehre denselben Befehl einmal in einer als Administrator gestarteten PowerShell aus.
+```text
+logs/bridge.out.log
+logs/bridge.err.log
+```
 
 Manuell starten und stoppen:
 
-```powershell
+```bash
 npm run service:start
 npm run service:stop
 ```
@@ -144,7 +136,13 @@ npm run service:stop
 Die eigentliche Bridge laeuft dabei ueber:
 
 ```text
-scripts/run-bridge.ps1
+scripts/start-bridge-macos.sh
+```
+
+Diagnose:
+
+```bash
+npm run doctor
 ```
 
 ## Slots manuell setzen
@@ -223,10 +221,11 @@ node .\bridge\monitor-bridge.mjs set-agent --agent noah --status offline --detai
 
 ### Tokenbasierte Agenten-Aktivitaet
 
-Fuer Noah und Carmen kann die Bridge optional statt SSH einen schlanken HTTP-JSON-Endpunkt auf dem jeweiligen VPS abfragen:
+Fuer Noah kann die Bridge optional statt SSH einen schlanken HTTP-JSON-Endpunkt auf dem VPS abfragen. Carmen laeuft auf macOS standardmaessig gegen den lokalen Docker-Container `carmen-runtime` und liest dort `integrations/whatsapp/openai_activity.py` per `docker exec`:
 
 - `CODEX_MONITOR_NOAH_STATUS_URL`
 - `CODEX_MONITOR_CARMEN_STATUS_URL`
+- `CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND`
 
 Optional:
 
@@ -260,16 +259,19 @@ Alternativ reicht auch:
 }
 ```
 
-Die Bridge erkennt daraus echte OpenAI-Aktivitaet und laesst die Leuchte blinken, wenn Tokenverbrauch steigt oder juengste Aktivitaet gemeldet wird.
+Die Carmen-Kachel zeigt bewusst das aktuelle Fenster als `OpenAI <tokens> Tok/<minuten>m`. Historische Gesamtsummen werden nicht mehr als Haupttext angezeigt, damit `3.6M Tok ges.` nicht wie aktueller Verbrauch wirkt. Die Leuchte blinkt nur bei Aktivitaet im aktuellen Fenster.
+
+Noah ist eine Python-only-Runtime. Die Noah-Agentenleuchte nutzt deshalb keine OpenAI-Tokens, sondern den vorhandenen Noah-Monitor: Zykluszeit, Marktstatus, PnL und Trade-Zaehler bilden eine Runtime-Metric. Die Kachel zeigt `Runtime <Markt> <Modus>` und blinkt, wenn sich diese Runtime-Metric aendert.
 
 In den zugehoerigen Agenten-Repos sind jetzt bereits konkrete Endpunkte vorgesehen:
 
 - Noah:
   - `http://<host>:8765/api/v1/status/openai-activity`
   - Auth: `NOAH_COMPANION_API_TOKEN`
+  - macOS-Default: `CODEX_MONITOR_NOAH_MONITOR_BASE_URL` oder `http://100.98.171.9:8765`
 - Carmen:
-  - `http://<host>:4319/status/openai-activity`
-  - Auth: `CARMEN_WHATSAPP_PUSH_TOKEN`
+  - macOS-Default: `docker exec carmen-runtime sh -lc 'cd /root/.openclaw/workspace && python3 integrations/whatsapp/openai_activity.py'`
+  - Legacy/Remote nur explizit ueber `CODEX_MONITOR_CARMEN_STATUS_URL` oder `CODEX_MONITOR_CARMEN_SSH_HOST`
 
 Eine kleine Referenz fuer so einen VPS-Endpunkt liegt hier:
 
