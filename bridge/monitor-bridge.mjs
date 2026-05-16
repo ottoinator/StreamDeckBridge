@@ -1808,6 +1808,26 @@ function formatDateInZone(value, timeZone) {
   }).format(value);
 }
 
+function isWeekendInZone(value, timeZone) {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short"
+  }).format(value);
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+function isNoahNonTradingDay(summary, now = new Date()) {
+  if (summary?.error) {
+    return false;
+  }
+  const live = summary?.live || {};
+  const tradingMarkets = Array.isArray(live.trading_markets) ? live.trading_markets : [];
+  if (tradingMarkets.length > 0 || summary?.cycle?.trading) {
+    return false;
+  }
+  return isWeekendInZone(now, "Europe/Berlin") && isWeekendInZone(now, "America/New_York");
+}
+
 function normalizeTradeDay(value) {
   if (!value) {
     return "";
@@ -2419,6 +2439,7 @@ function buildNoahTiles(summary) {
   const pnl = summary?.pnl || {};
   const trades = summary?.trades_today || {};
   const live = summary?.live || {};
+  const nonTradingDay = isNoahNonTradingDay(summary);
   const cycleHasFutureTimer = isFutureTimestamp(cycle.next_cycle_at);
   const cycleStatus = cycle.trading ? (cycleHasFutureTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
@@ -2445,18 +2466,18 @@ function buildNoahTiles(summary) {
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: pnlStatus(pnl.daily_eur, degraded),
-      line1: formatSignedEuro(pnl.daily_eur),
-      line2: formatSignedPercent(pnl.daily_pct),
-      footer: "24h",
+      status: nonTradingDay ? "idle" : pnlStatus(pnl.daily_eur, degraded),
+      line1: nonTradingDay ? "Geschlossen" : formatSignedEuro(pnl.daily_eur),
+      line2: nonTradingDay ? blankTileLine() : formatSignedPercent(pnl.daily_pct),
+      footer: nonTradingDay ? "Heute" : "24h",
       updatedAt
     },
     trades_today: {
       key: "trades_today",
       label: "Trades Heute",
-      status: degraded ? "warn" : "ok",
-      line1: `Open ${Number(trades.open || 0)}`,
-      line2: `Close ${Number(trades.closed || 0)}`,
+      status: nonTradingDay ? "idle" : degraded ? "warn" : "ok",
+      line1: nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
       footer: "Heute",
       updatedAt
     },
