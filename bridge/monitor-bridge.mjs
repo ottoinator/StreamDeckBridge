@@ -1825,7 +1825,7 @@ function isNoahNonTradingDay(summary, now = new Date()) {
   if (tradingMarkets.length > 0 || summary?.cycle?.trading) {
     return false;
   }
-  return isWeekendInZone(now, "Europe/Berlin") && isWeekendInZone(now, "America/New_York");
+  return Boolean(summary?.market_closed) || (isWeekendInZone(now, "Europe/Berlin") && isWeekendInZone(now, "America/New_York"));
 }
 
 function normalizeTradeDay(value) {
@@ -2094,20 +2094,28 @@ function buildNoahSummary(statusCard, observerCard) {
     const portfolio = observer.portfolio || {};
     const runtimeMode = status.runtime_mode || {};
     const sessionStatus = String(status.market_session_status || status.active_market_status || "").trim().toLowerCase();
+    const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || "").trim();
+    const observerTradeDay = String(observer.trade_day || tradeActivity.trade_day || "").trim();
+    const portfolioTradeDay = String(portfolio.trade_day || "").trim();
+    const staleForStatusDay = Boolean(
+      statusTradeDay &&
+      ((observerTradeDay && observerTradeDay !== statusTradeDay) || (portfolioTradeDay && portfolioTradeDay !== statusTradeDay))
+    );
     const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizedKey,
       label: noahMarketLabel(normalizedKey),
       product: noahProductLabel(normalizedKey),
-      trading: sessionStatus === "open",
-      nextCycleAt: chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
+      trading: sessionStatus === "open" && !staleForStatusDay,
+      nextCycleAt: staleForStatusDay ? null : chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
       modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || status.posture?.session_state || sessionStatus),
-      openTrades: Number(tradeActivity.open_positions || 0),
-      closedTrades: Number(tradeActivity.closed_trades || 0),
-      dailyPnlEur: Number(portfolio.daily_pnl_eur || 0),
-      dailyPnlPct: Number(portfolio.daily_pnl_pct || 0),
-      weeklyPnlEur,
-      weeklyPnlPct: portfolioWeekPnlPct(portfolio, weeklyPnlEur)
+      openTrades: staleForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
+      closedTrades: staleForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
+      dailyPnlEur: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_eur || 0),
+      dailyPnlPct: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_pct || 0),
+      weeklyPnlEur: staleForStatusDay ? 0 : weeklyPnlEur,
+      weeklyPnlPct: staleForStatusDay ? 0 : portfolioWeekPnlPct(portfolio, weeklyPnlEur),
+      staleForStatusDay
     };
   });
 
@@ -2138,10 +2146,12 @@ function buildNoahSummary(statusCard, observerCard) {
   const configuredProducts = Array.from(new Set(marketRows.map(row => row.product)));
   const tradingMarkets = marketRows.filter(row => row.trading).map(row => row.label);
   const tradingProducts = Array.from(new Set(marketRows.filter(row => row.trading).map(row => row.product)));
+  const marketClosed = tradingMarkets.length === 0;
 
   return {
     checked_at: nowIso(),
-    cycle: activeCycleRow
+    market_closed: marketClosed,
+    cycle: activeCycleRow && !marketClosed
       ? {
           market_label: activeCycleRow.label,
           mode_label: activeCycleRow.modeLabel,
@@ -2150,14 +2160,14 @@ function buildNoahSummary(statusCard, observerCard) {
         }
       : null,
     pnl: {
-      daily_eur: Number(combinedPortfolio.daily_pnl_eur || 0),
-      daily_pct: Number(combinedPortfolio.daily_pnl_pct || 0),
-      weekly_eur: weeklyEur,
-      weekly_pct: weeklyPct
+      daily_eur: marketClosed ? 0 : Number(combinedPortfolio.daily_pnl_eur || 0),
+      daily_pct: marketClosed ? 0 : Number(combinedPortfolio.daily_pnl_pct || 0),
+      weekly_eur: marketClosed ? 0 : weeklyEur,
+      weekly_pct: marketClosed ? 0 : weeklyPct
     },
     trades_today: {
-      open: marketRows.reduce((sum, row) => sum + Math.max(0, row.openTrades || 0), 0),
-      closed: marketRows.reduce((sum, row) => sum + Math.max(0, row.closedTrades || 0), 0)
+      open: marketClosed ? 0 : marketRows.reduce((sum, row) => sum + Math.max(0, row.openTrades || 0), 0),
+      closed: marketClosed ? 0 : marketRows.reduce((sum, row) => sum + Math.max(0, row.closedTrades || 0), 0)
     },
     live: {
       configured_markets: configuredMarkets,
