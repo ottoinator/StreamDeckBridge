@@ -243,19 +243,28 @@ for market in markets:
     trade_activity = (observer or {}).get('trade_activity') or {}
     runtime_mode = (intraday_row.get('runtime_mode') or {})
     session_status = str(status.get('market_session_status') or '').strip().lower()
+    status_trade_day = str(status.get('trade_day') or (status.get('market_session') or {}).get('trade_day') or '').strip()
+    observer_trade_day = str((observer or {}).get('trade_day') or trade_activity.get('trade_day') or '').strip()
+    portfolio_trade_day = str(portfolio.get('trade_day') or '').strip()
+    disabled = bool(status.get('disabled')) or session_status == 'disabled' or bool(runtime_mode.get('disabled')) or str(runtime_mode.get('runtime_mode') or '').strip().upper() == 'DISABLED'
+    stale_for_status_day = bool(status_trade_day and (
+        (observer_trade_day and observer_trade_day != status_trade_day) or
+        (portfolio_trade_day and portfolio_trade_day != status_trade_day)
+    ))
+    count_for_today = not disabled and not stale_for_status_day
     rows.append({
         'market': market,
         'label': market_label(market),
         'product': product_label(market),
-        'trading': session_status == 'open',
+        'trading': session_status == 'open' and count_for_today,
         'mode_label': short_mode(runtime_mode.get('execution_window_mode') or runtime_mode.get('runtime_mode') or session_status),
-        'next_cycle_at': runtime_mode.get('next_regular_cycle_ts_et') or status.get('next_cycle_ts_et') or combined.get('next_cycle_ts_et'),
-        'daily_pnl_eur': float(portfolio.get('daily_pnl_eur') or 0.0),
-        'daily_pnl_pct': float(portfolio.get('daily_pnl_pct') or 0.0),
-        'weekly_pnl_eur': float(portfolio.get('weekly_pnl_eur') or 0.0),
-        'weekly_pnl_pct': float(portfolio.get('weekly_pnl_pct') or 0.0),
-        'open_trades': int(trade_activity.get('open_positions') or 0),
-        'closed_trades': int(trade_activity.get('closed_trades') or 0),
+        'next_cycle_at': (runtime_mode.get('next_regular_cycle_ts_et') or status.get('next_cycle_ts_et') or combined.get('next_cycle_ts_et')) if count_for_today else None,
+        'daily_pnl_eur': float(portfolio.get('daily_pnl_eur') or 0.0) if count_for_today else 0.0,
+        'daily_pnl_pct': float(portfolio.get('daily_pnl_pct') or 0.0) if count_for_today else 0.0,
+        'weekly_pnl_eur': float(portfolio.get('weekly_pnl_eur') or 0.0) if count_for_today else 0.0,
+        'weekly_pnl_pct': float(portfolio.get('weekly_pnl_pct') or 0.0) if count_for_today else 0.0,
+        'open_trades': int(trade_activity.get('open_positions') or 0) if count_for_today else 0,
+        'closed_trades': int(trade_activity.get('closed_trades') or 0) if count_for_today else 0,
     })
 active_market = combined.get('active_market')
 cycle_row = next((row for row in rows if row['market'] == active_market and row.get('next_cycle_at')), None) or next((row for row in rows if row['trading'] and row.get('next_cycle_at')), None) or next((row for row in rows if row.get('next_cycle_at')), None) or next((row for row in rows if row['market'] == active_market), None) or next((row for row in rows if row['trading']), None) or (rows[0] if rows else None)
@@ -2147,6 +2156,8 @@ function buildNoahSummary(statusCard, observerCard) {
   const tradingMarkets = marketRows.filter(row => row.trading).map(row => row.label);
   const tradingProducts = Array.from(new Set(marketRows.filter(row => row.trading).map(row => row.product)));
   const marketClosed = tradingMarkets.length === 0;
+  const dailyEur = marketRows.reduce((sum, row) => sum + row.dailyPnlEur, 0);
+  const dailyPct = marketRows.reduce((sum, row) => sum + row.dailyPnlPct, 0);
 
   return {
     checked_at: nowIso(),
@@ -2160,8 +2171,8 @@ function buildNoahSummary(statusCard, observerCard) {
         }
       : null,
     pnl: {
-      daily_eur: marketClosed ? 0 : Number(combinedPortfolio.daily_pnl_eur || 0),
-      daily_pct: marketClosed ? 0 : Number(combinedPortfolio.daily_pnl_pct || 0),
+      daily_eur: marketClosed ? 0 : dailyEur,
+      daily_pct: marketClosed ? 0 : dailyPct,
       weekly_eur: marketClosed ? 0 : weeklyEur,
       weekly_pct: marketClosed ? 0 : weeklyPct
     },
@@ -2199,9 +2210,19 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
     const tradeActivity = market.trade_activity || {};
     const portfolio = market.portfolio || {};
     const marketKey = market.market_registry?.market_key || key;
+    const normalizedKey = normalizeNoahMarketKey(marketKey);
     const sessionOpen =
       String(status.market_session_status || session.market_session_status || "").trim().toLowerCase() === "open" ||
       Boolean(status.market_open ?? market.market_open);
+    const sessionStatus = String(status.market_session_status || session.market_session_status || "").trim().toLowerCase();
+    const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || payload?.trade_day || "").trim();
+    const marketTradeDay = String(market.trade_day || tradeActivity.trade_day || portfolio.trade_day || "").trim();
+    const disabled =
+      Boolean(status.disabled || market.disabled || portfolio.disabled) ||
+      sessionStatus === "disabled" ||
+      String(status.runtime_mode?.runtime_mode || runtimeMode.runtime_mode || "").trim().toUpperCase() === "DISABLED";
+    const staleForStatusDay = Boolean(statusTradeDay && marketTradeDay && marketTradeDay !== statusTradeDay);
+    const countForToday = !disabled && !staleForStatusDay;
     const rawNextCycleAt =
       status.next_regular_cycle_ts_et ||
       status.next_cycle_ts_et ||
@@ -2216,29 +2237,33 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
         0
       ) || 0;
     const nextCycleAt =
-      !sessionOpen && !isFutureTimestamp(rawNextCycleAt)
+      !countForToday
+        ? null
+        : !sessionOpen && !isFutureTimestamp(rawNextCycleAt)
         ? fallbackNextCycle(marketKey)
         : normalizeFutureCycleTimestamp(rawNextCycleAt, cycleIntervalMinutes) || rawNextCycleAt;
     const hasLiveCycle = isFutureTimestamp(nextCycleAt);
     const trading =
+      countForToday &&
       sessionOpen &&
       (hasLiveCycle || String(runtimeMode.runtime_mode || status.runtime_mode || "").trim().toUpperCase() === "REGULAR_CYCLE");
     const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
-      key: normalizeNoahMarketKey(marketKey),
+      key: normalizedKey,
       label: noahMarketLabel(marketKey),
       product: noahProductLabel(marketKey),
       trading,
       nextCycleAt,
       modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || session.session_state_raw || session.session_state),
-      openTrades: Number((tradeActivity.counts || tradeActivity).open_positions || 0),
-      closedTrades: Number((tradeActivity.counts || tradeActivity).closed_trades || 0),
-      dailyPnlEur: Number(portfolio.daily_pnl_eur || 0),
-      dailyPnlPct: Number(portfolio.daily_pnl_pct || 0),
-      weeklyPnlEur,
-      weeklyPnlPct: portfolioWeekPnlPct(portfolio, weeklyPnlEur),
+      openTrades: countForToday ? Number((tradeActivity.counts || tradeActivity).open_positions || 0) : 0,
+      closedTrades: countForToday ? Number((tradeActivity.counts || tradeActivity).closed_trades || 0) : 0,
+      dailyPnlEur: countForToday ? Number(portfolio.daily_pnl_eur || 0) : 0,
+      dailyPnlPct: countForToday ? Number(portfolio.daily_pnl_pct || 0) : 0,
+      weeklyPnlEur: countForToday ? weeklyPnlEur : 0,
+      weeklyPnlPct: countForToday ? portfolioWeekPnlPct(portfolio, weeklyPnlEur) : 0,
       sessionOpen,
-      hasLiveCycle
+      hasLiveCycle,
+      staleForStatusDay
     };
   });
 
@@ -2267,8 +2292,8 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
         }
       : null,
     pnl: {
-      daily_eur: Number(combinedPortfolio.daily_pnl_eur || rows.reduce((sum, row) => sum + row.dailyPnlEur, 0)),
-      daily_pct: Number(combinedPortfolio.daily_pnl_pct || rows.reduce((sum, row) => sum + row.dailyPnlPct, 0)),
+      daily_eur: rows.reduce((sum, row) => sum + row.dailyPnlEur, 0),
+      daily_pct: rows.reduce((sum, row) => sum + row.dailyPnlPct, 0),
       weekly_eur: weeklyEur,
       weekly_pct: weeklyPct
     },
