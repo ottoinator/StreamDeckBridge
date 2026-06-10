@@ -223,9 +223,10 @@ def get(path,t,timeout=20):
     if t: h['Authorization']='Bearer '+t
     with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765'+path,headers=h),timeout=timeout) as y: return json.load(y)
 def market_label(market):
-    return {'us':'US','xetra':'EU','eu_multi':'EU','index_futures':'IF'}.get(str(market or '').strip().lower(), str(market or '').upper()[:2] or '??')
+    return {'us':'US','xetra':'EU','eu_multi':'EU','japan_equities':'JP','index_futures':'IF','crypto':'CR'}.get(str(market or '').strip().lower(), str(market or '').upper()[:2] or '??')
 def product_label(market):
-    return 'FUT' if str(market or '').strip().lower() == 'index_futures' else 'EQ'
+    raw=str(market or '').strip().lower()
+    return 'FUT' if raw == 'index_futures' else ('CRY' if raw == 'crypto' else 'EQ')
 def short_mode(value):
     raw=str(value or '').strip().lower()
     mapping={'morning_burst':'Burst','open_stabilization':'Stabi','early_attack':'Attack','regular_day':'RegDay','tradeable':'Trade','defensive':'Def','close_only':'Exit','idle':'Idle'}
@@ -2052,6 +2053,9 @@ function normalizeNoahMarketKey(value) {
   if (raw === "index_futures" || raw === "futures" || raw === "global_futures") {
     return "index_futures";
   }
+  if (raw === "crypto" || raw === "digital_assets") {
+    return "crypto";
+  }
   return raw || "us";
 }
 
@@ -2066,12 +2070,21 @@ function noahMarketLabel(value) {
   if (market === "index_futures") {
     return "IF";
   }
+  if (market === "crypto") {
+    return "CR";
+  }
   return "US";
 }
 
 function noahProductLabel(value) {
   const market = normalizeNoahMarketKey(value);
-  return market === "index_futures" ? "FUT" : "EQ";
+  if (market === "index_futures") {
+    return "FUT";
+  }
+  if (market === "crypto") {
+    return "CRY";
+  }
+  return "EQ";
 }
 
 function shortCycleMode(value) {
@@ -2199,6 +2212,9 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
     }
     if (normalized === "us") {
       return nextBerlinWeekdayTime(15, 30);
+    }
+    if (normalized === "crypto") {
+      return new Date(Date.now() + 5 * 60_000).toISOString();
     }
     return null;
   };
@@ -2478,6 +2494,8 @@ function buildNoahTiles(summary) {
   const cycleHasFutureTimer = isFutureTimestamp(cycle.next_cycle_at);
   const cycleStatus = cycle.trading ? (cycleHasFutureTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
+  const liveProducts = compactCodes(live.trading_products || live.products, blankTileLine());
+  const configuredMarkets = compactCodes(live.configured_markets, "-");
 
   const tiles = {
     cycle: {
@@ -2521,8 +2539,8 @@ function buildNoahTiles(summary) {
       label: "Live Markt",
       status: degraded && liveTileStatus(summary) !== "ok" ? "warn" : liveTileStatus(summary),
       line1: liveMarkets,
-      line2: blankTileLine(),
-      footer: blankTileLine(),
+      line2: liveProducts,
+      footer: liveMarkets === "-" ? configuredMarkets : "Live",
       updatedAt
     }
   };

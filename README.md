@@ -5,7 +5,7 @@ Lokale macOS-Integration fuer Elgato Stream Deck und Codex. Die fruehere Windows
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 4 Noah-Monitor-Kacheln fuer Xetra- und US-Betrieb
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 5 Noah-Monitor-Kacheln fuer Cycle, Wochen-PnL, Tages-PnL, Trades und Live-Maerkte
 
 Fuer Codex-Chats gibt es einen expliziten Meldeweg:
 
@@ -287,14 +287,15 @@ docs/openai-agent-activity.md
 
 ## Noah-Monitor-Kacheln
 
-Die vier Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
+Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
 
-- `Noah Xetra Status`: zeigt, ob der Xetra-Smoke laeuft und ob bereits Trades entstanden sind
-- `Noah Xetra Cycle`: zeigt letzten Xetra-Zyklus, Cycle-Zaehler und Countdown bis zum naechsten Xetra-Zyklus
-- `Noah US Status`: zeigt, ob Noah im US-Handel ist oder wie lange es noch bis zum Start dauert
-- `Noah US Cycle`: zeigt letzten US-Zyklus, Trade-Counter und Countdown bis zum naechsten US-Zyklus
+- `Noah Cycle`: zeigt den naechsten Zyklus des aktiven oder naechsten offenen Noah-Markts
+- `Noah Weekly PnL`: zeigt die kombinierte Wochen-PnL aus Noahs Portfolio-/Trade-Truth
+- `Noah Daily PnL`: zeigt die Tages-PnL; an echten Nicht-Handelstagen wird kein alter Tageswert ausgespielt
+- `Noah Trades Today`: zeigt offene und geschlossene Trades des aktuellen Trade-Days
+- `Noah Live Markets`: zeigt aktuell handelnde Maerkte und Produktfamilien, z.B. `US`, `EU`, `JP`, `IF` oder `CR` sowie `EQ`, `FUT` oder `CRY`
 
-Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen.
+Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen. US, EU, Japan, Index-Futures und Crypto werden aus dem Companion-Marktvertrag gelesen; geschlossene oder stale Maerkte bleiben konfiguriert sichtbar, zaehlen aber nicht als live/trading.
 
 ## Ueber die Bridge starten
 
