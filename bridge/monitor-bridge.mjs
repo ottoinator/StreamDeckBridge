@@ -2103,6 +2103,11 @@ function shortCycleMode(value) {
   return mapping[raw] || titleCaseValue(raw || "warte").slice(0, 8);
 }
 
+function noahRuntimeModeCountsAsTrading(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return ["REGULAR_CYCLE", "PAPER_CRYPTO_SPOT"].includes(normalized);
+}
+
 function buildNoahSummary(statusCard, observerCard) {
   const statusMarkets = statusCard?.markets && typeof statusCard.markets === "object" ? statusCard.markets : {};
   const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
@@ -2119,20 +2124,27 @@ function buildNoahSummary(statusCard, observerCard) {
     const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || "").trim();
     const observerTradeDay = String(observer.trade_day || tradeActivity.trade_day || "").trim();
     const portfolioTradeDay = String(portfolio.trade_day || "").trim();
-    const staleForStatusDay = Boolean(
+    const staleActivityForStatusDay = Boolean(
       statusTradeDay &&
-      ((observerTradeDay && observerTradeDay !== statusTradeDay) || (portfolioTradeDay && portfolioTradeDay !== statusTradeDay))
+      observerTradeDay &&
+      observerTradeDay !== statusTradeDay
     );
+    const stalePortfolioForStatusDay = Boolean(
+      statusTradeDay &&
+      portfolioTradeDay &&
+      portfolioTradeDay !== statusTradeDay
+    );
+    const staleForStatusDay = staleActivityForStatusDay || stalePortfolioForStatusDay;
     const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizedKey,
       label: noahMarketLabel(normalizedKey),
       product: noahProductLabel(normalizedKey),
-      trading: sessionStatus === "open" && !staleForStatusDay,
-      nextCycleAt: staleForStatusDay ? null : chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
+      trading: sessionStatus === "open" && !staleActivityForStatusDay,
+      nextCycleAt: staleActivityForStatusDay ? null : chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
       modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || status.posture?.session_state || sessionStatus),
-      openTrades: staleForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
-      closedTrades: staleForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
+      openTrades: staleActivityForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
+      closedTrades: staleActivityForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
       dailyPnlEur: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_eur || 0),
       dailyPnlPct: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_pct || 0),
       weeklyPnlEur: staleForStatusDay ? 0 : weeklyPnlEur,
@@ -2252,17 +2264,17 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
         runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes ||
         0
       ) || 0;
+    const normalizedFutureCycle = normalizeFutureCycleTimestamp(rawNextCycleAt, cycleIntervalMinutes);
     const nextCycleAt =
       !countForToday
         ? null
-        : !sessionOpen && !isFutureTimestamp(rawNextCycleAt)
-        ? fallbackNextCycle(marketKey)
-        : normalizeFutureCycleTimestamp(rawNextCycleAt, cycleIntervalMinutes) || rawNextCycleAt;
+        : normalizedFutureCycle || (isFutureTimestamp(rawNextCycleAt) ? rawNextCycleAt : fallbackNextCycle(marketKey));
     const hasLiveCycle = isFutureTimestamp(nextCycleAt);
+    const modeCountsAsTrading = noahRuntimeModeCountsAsTrading(runtimeMode.runtime_mode || status.runtime_mode);
     const trading =
       countForToday &&
       sessionOpen &&
-      (hasLiveCycle || String(runtimeMode.runtime_mode || status.runtime_mode || "").trim().toUpperCase() === "REGULAR_CYCLE");
+      (hasLiveCycle || modeCountsAsTrading);
     const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizedKey,
