@@ -1777,10 +1777,17 @@ function chooseNoahCycleTimestamp(status, runtimeMode, topStatus = {}, isActiveM
     finiteNumber(runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes, 0);
   const candidates = [
     status?.next_cycle_ts_et,
+    status?.next_cycle_ts_utc,
     isActiveMarket ? topStatus?.next_cycle_ts_et : null,
+    isActiveMarket ? topStatus?.next_cycle_ts_utc : null,
     runtimeMode?.next_cycle_ts_et,
+    runtimeMode?.next_cycle_ts_utc,
     status?.next_regular_cycle_ts_et,
-    runtimeMode?.next_regular_cycle_ts_et
+    status?.next_regular_cycle_ts_utc,
+    status?.next_regular_cycle_at,
+    runtimeMode?.next_regular_cycle_ts_et,
+    runtimeMode?.next_regular_cycle_ts_utc,
+    runtimeMode?.next_regular_cycle_at
   ];
   for (const candidate of candidates) {
     const normalized = normalizeFutureCycleTimestamp(candidate, intervalMinutes);
@@ -2113,6 +2120,15 @@ function buildNoahSummary(statusCard, observerCard) {
   const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
   const marketKeys = Array.from(new Set([...Object.keys(statusMarkets), ...Object.keys(observerMarkets)]));
   const activeMarketKey = normalizeNoahMarketKey(statusCard?.active_market || observerCard?.active_market);
+  const combinedPortfolio = observerCard?.portfolio || statusCard?.portfolio || {};
+  const combinedTradeActivity = observerCard?.trade_activity || statusCard?.trade_activity || {};
+  const combinedTradeDay = String(
+    combinedTradeActivity.trade_day ||
+    combinedPortfolio.trade_day ||
+    statusCard?.trade_day ||
+    observerCard?.trade_day ||
+    ""
+  ).trim();
   const marketRows = marketKeys.map(key => {
     const normalizedKey = normalizeNoahMarketKey(key);
     const status = statusMarkets[key] || {};
@@ -2124,6 +2140,7 @@ function buildNoahSummary(statusCard, observerCard) {
     const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || "").trim();
     const observerTradeDay = String(observer.trade_day || tradeActivity.trade_day || "").trim();
     const portfolioTradeDay = String(portfolio.trade_day || "").trim();
+    const rowTradeDay = observerTradeDay || portfolioTradeDay || statusTradeDay;
     const staleActivityForStatusDay = Boolean(
       statusTradeDay &&
       observerTradeDay &&
@@ -2134,17 +2151,18 @@ function buildNoahSummary(statusCard, observerCard) {
       portfolioTradeDay &&
       portfolioTradeDay !== statusTradeDay
     );
-    const staleForStatusDay = staleActivityForStatusDay || stalePortfolioForStatusDay;
+    const staleForCombinedDay = Boolean(combinedTradeDay && rowTradeDay && rowTradeDay !== combinedTradeDay);
+    const staleForStatusDay = staleActivityForStatusDay || stalePortfolioForStatusDay || staleForCombinedDay;
     const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
     return {
       key: normalizedKey,
       label: noahMarketLabel(normalizedKey),
       product: noahProductLabel(normalizedKey),
-      trading: sessionStatus === "open" && !staleActivityForStatusDay,
+      trading: sessionStatus === "open" && !staleForStatusDay,
       nextCycleAt: staleActivityForStatusDay ? null : chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
       modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || status.posture?.session_state || sessionStatus),
-      openTrades: staleActivityForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
-      closedTrades: staleActivityForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
+      openTrades: staleForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
+      closedTrades: staleForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
       dailyPnlEur: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_eur || 0),
       dailyPnlPct: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_pct || 0),
       weeklyPnlEur: staleForStatusDay ? 0 : weeklyPnlEur,
@@ -2163,7 +2181,6 @@ function buildNoahSummary(statusCard, observerCard) {
     marketRows[0] ||
     null;
 
-  const combinedPortfolio = observerCard?.portfolio || {};
   let weeklyEur = portfolioWeekPnlEur(combinedPortfolio);
   if (!nonZeroNumber(weeklyEur)) {
     const activeWeekly = marketRows.find(row => row.key === activeMarketKey && nonZeroNumber(row.weeklyPnlEur));
@@ -2217,6 +2234,14 @@ function buildNoahSummary(statusCard, observerCard) {
 function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
   const markets = payload?.markets && typeof payload.markets === "object" ? payload.markets : {};
   const sessions = payload?.sessions && typeof payload.sessions === "object" ? payload.sessions : {};
+  const combinedPortfolio = payload?.portfolio || {};
+  const combinedTradeActivity = payload?.trade_activity || {};
+  const combinedTradeDay = String(
+    combinedTradeActivity.trade_day ||
+    combinedPortfolio.trade_day ||
+    payload?.trade_day ||
+    ""
+  ).trim();
   const fallbackNextCycle = marketKey => {
     const normalized = normalizeNoahMarketKey(marketKey);
     if (normalized === "xetra") {
@@ -2249,7 +2274,10 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
       Boolean(status.disabled || market.disabled || portfolio.disabled) ||
       sessionStatus === "disabled" ||
       String(status.runtime_mode?.runtime_mode || runtimeMode.runtime_mode || "").trim().toUpperCase() === "DISABLED";
-    const staleForStatusDay = Boolean(statusTradeDay && marketTradeDay && marketTradeDay !== statusTradeDay);
+    const staleForStatusDay = Boolean(
+      (statusTradeDay && marketTradeDay && marketTradeDay !== statusTradeDay) ||
+      (combinedTradeDay && marketTradeDay && marketTradeDay !== combinedTradeDay)
+    );
     const countForToday = !disabled && !staleForStatusDay;
     const rawNextCycleAt =
       status.next_regular_cycle_ts_et ||
@@ -2304,7 +2332,6 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
     rows[0] ||
     null;
 
-  const combinedPortfolio = payload?.portfolio || {};
   const combinedTradeCounts = payload?.trade_activity?.counts || payload?.trade_activity || {};
   const weeklyEur = portfolioWeekPnlEur(combinedPortfolio) || rows.reduce((sum, row) => sum + row.weeklyPnlEur, 0);
   const weeklyPct = portfolioWeekPnlPct(combinedPortfolio, weeklyEur) || rows.reduce((sum, row) => sum + row.weeklyPnlPct, 0);
