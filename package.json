@@ -6,6 +6,7 @@
   "scripts": {
     "build": "npm run build:plugin",
     "build:plugin": "rollup -c streamdeck-plugin/rollup.config.mjs",
+    "test": "node --test",
     "bridge": "node bridge/monitor-bridge.mjs serve",
     "bridge:init": "node bridge/monitor-bridge.mjs init",
     "bridge:slots": "node bridge/monitor-bridge.mjs list",

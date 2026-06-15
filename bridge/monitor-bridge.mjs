@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.CODEX_MONITOR_PORT || 4567);
 const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
@@ -1733,8 +1734,20 @@ function nonZeroNumber(value, epsilon = 0.005) {
   return Number.isFinite(numeric) && Math.abs(numeric) > epsilon ? numeric : null;
 }
 
+function explicitFiniteNumber(source, key) {
+  if (!source || !Object.prototype.hasOwnProperty.call(source, key)) {
+    return null;
+  }
+  const value = source[key];
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function portfolioWeekPnlEur(portfolio) {
-  const explicit = nonZeroNumber(portfolio?.weekly_pnl_eur);
+  const explicit = explicitFiniteNumber(portfolio, "weekly_pnl_eur");
   if (explicit !== null) {
     return explicit;
   }
@@ -1746,19 +1759,11 @@ function portfolioWeekPnlEur(portfolio) {
       return delta;
     }
   }
-  const realized = finiteNumber(portfolio?.realized_pnl_eur_total, NaN);
-  const unrealized = finiteNumber(portfolio?.unrealized_pnl_eur_total, 0);
-  if (Number.isFinite(realized)) {
-    const total = nonZeroNumber(realized + unrealized);
-    if (total !== null) {
-      return total;
-    }
-  }
-  return finiteNumber(portfolio?.weekly_pnl_eur, 0);
+  return 0;
 }
 
 function portfolioWeekPnlPct(portfolio, pnlEur) {
-  const explicit = nonZeroNumber(portfolio?.weekly_pnl_pct, 0.0005);
+  const explicit = explicitFiniteNumber(portfolio, "weekly_pnl_pct");
   if (explicit !== null) {
     return explicit;
   }
@@ -2590,6 +2595,14 @@ function buildNoahTiles(summary) {
   }));
 }
 
+export {
+  buildNoahSummary,
+  buildNoahSummaryFromObserverLive,
+  buildNoahTiles,
+  portfolioWeekPnlEur,
+  portfolioWeekPnlPct
+};
+
 async function updateSlot(slotNumber, patch) {
   const slots = await readSlots();
   const slotIndex = normalizeSlot(slotNumber) - 1;
@@ -3216,7 +3229,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

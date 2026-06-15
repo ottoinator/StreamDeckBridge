@@ -297,6 +297,8 @@ Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Compan
 
 Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen. US, EU, Japan, Index-Futures und Crypto werden aus dem Companion-Marktvertrag gelesen; geschlossene oder stale Maerkte bleiben konfiguriert sichtbar, zaehlen aber nicht als live/trading.
 
+Die Wochen-PnL-Kachel behandelt `weekly_pnl_eur: 0` als autoritativen aktuellen Wochenwert. Sie darf nicht auf `realized_pnl_eur_total` zurueckfallen, weil dieser Wert markt- oder ledgeruebergreifend alte realisierte PnL enthalten kann.
+
 ## Ueber die Bridge starten
 
 Beispiel fuer einen ueberwachten Prozess:
