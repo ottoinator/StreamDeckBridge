@@ -205,8 +205,8 @@ export function normalizeState(payload: unknown): MonitorState {
         blinkUntil: typeof agent.blinkUntil === "string" ? agent.blinkUntil : item.blinkUntil
       };
     }),
-    noahTiles: fallback.noahTiles.map((item, index) => {
-      const candidate = noahTiles[index];
+    noahTiles: fallback.noahTiles.map(item => {
+      const candidate = noahTiles.find(tile => tile && typeof tile === "object" && (tile as Partial<NoahTileState>).key === item.key);
       if (!candidate || typeof candidate !== "object") {
         return item;
       }
@@ -232,6 +232,10 @@ function escapeXml(input: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function wrapText(value: string, maxLineLength: number, maxLines: number): string[] {
@@ -312,7 +316,7 @@ export function slotSvg(slot: SlotState): string {
     .map((line, index) => `<text x="8" y="${40 + index * 9}" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${meta.color}" />
       <rect x="5" y="5" width="62" height="62" rx="10" fill="rgba(255,255,255,0.08)" />
@@ -322,7 +326,7 @@ export function slotSvg(slot: SlotState): string {
       ${titleSvg}
       ${detailSvg}
     </svg>
-  `)}`;
+  `);
 }
 
 export function agentSvg(agent: AgentState): string {
@@ -373,7 +377,7 @@ export function agentSvg(agent: AgentState): string {
     .map((line, index) => `<text x="36" y="${53 + index * 8}" text-anchor="middle" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${backgroundColor}" />
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.06)" />
@@ -383,7 +387,7 @@ export function agentSvg(agent: AgentState): string {
       ${titleSvg}
       ${detailSvg}
     </svg>
-  `)}`;
+  `);
 }
 
 export function noahTileSvg(tile: NoahTileState): string {
@@ -403,7 +407,7 @@ export function noahTileSvg(tile: NoahTileState): string {
     .map((line, index) => `<text x="8" y="${63 - index * 8}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${meta.color}" />
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.07)" />
@@ -412,5 +416,5 @@ export function noahTileSvg(tile: NoahTileState): string {
       ${detailSvg}
       ${footerSvg}
     </svg>
-  `)}`;
+  `);
 }

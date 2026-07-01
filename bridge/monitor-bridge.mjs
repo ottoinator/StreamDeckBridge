@@ -2120,6 +2120,46 @@ function noahRuntimeModeCountsAsTrading(value) {
   return ["REGULAR_CYCLE", "PAPER_CRYPTO_SPOT"].includes(normalized);
 }
 
+function buildNoahSummaryFromStreamdeckTiles(payload) {
+  if (!payload || payload.contract_version !== "streamdeck_tiles_v1") {
+    return makeNoahProbeFallback("Noah StreamDeck Tile Contract fehlt");
+  }
+  const cycle = payload.cycle || {};
+  const pnl = payload.pnl || {};
+  const tradesToday = payload.trades_today || {};
+  const live = payload.live || {};
+  const markets = payload.markets && typeof payload.markets === "object" ? Object.values(payload.markets) : [];
+  return {
+    checked_at: payload.generated_at_utc || nowIso(),
+    market_closed: !(Array.isArray(live.trading_markets) && live.trading_markets.length > 0),
+    cycle: cycle.market || cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et
+      ? {
+          market_label: cycle.market_label || noahMarketLabel(cycle.market),
+          mode_label: shortCycleMode(cycle.runtime_mode || (cycle.trading ? "open" : "closed")),
+          next_cycle_at: cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et || null,
+          trading: Boolean(cycle.trading)
+        }
+      : null,
+    pnl: {
+      daily_eur: finiteNumber(pnl.daily_eur, 0),
+      daily_pct: finiteNumber(pnl.daily_pct, 0),
+      weekly_eur: finiteNumber(pnl.weekly_eur, 0),
+      weekly_pct: finiteNumber(pnl.weekly_pct, 0)
+    },
+    trades_today: {
+      open: Number(tradesToday.open || 0),
+      closed: Number(tradesToday.closed || 0)
+    },
+    live: {
+      configured_markets: Array.isArray(live.configured_markets) ? live.configured_markets : markets.map(row => row.label).filter(Boolean),
+      configured_products: Array.isArray(live.configured_products) ? live.configured_products : Array.from(new Set(markets.map(row => row.product).filter(Boolean))),
+      trading_markets: Array.isArray(live.trading_markets) ? live.trading_markets : [],
+      trading_products: Array.isArray(live.trading_products) ? live.trading_products : []
+    },
+    markets
+  };
+}
+
 function buildNoahSummary(statusCard, observerCard) {
   const statusMarkets = statusCard?.markets && typeof statusCard.markets === "object" ? statusCard.markets : {};
   const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
@@ -2390,6 +2430,18 @@ async function probeNoahMonitor() {
     const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
     const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
     try {
+      const streamdeckTiles = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", "combined"),
+        { headers, timeoutMs }
+      );
+      const summary = buildNoahSummaryFromStreamdeckTiles(streamdeckTiles);
+      if (summary.live?.configured_markets?.length) {
+        return summary;
+      }
+    } catch {
+      // Fall back to the broader view contracts below.
+    }
+    try {
       const [statusCard, observerCard] = await Promise.all([
         fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", "combined"), { headers, timeoutMs }),
         fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "combined"), { headers, timeoutMs })
@@ -2563,10 +2615,10 @@ function buildNoahTiles(summary) {
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: nonTradingDay ? "idle" : pnlStatus(pnl.daily_eur, degraded),
-      line1: nonTradingDay ? "Geschlossen" : formatSignedEuro(pnl.daily_eur),
-      line2: nonTradingDay ? blankTileLine() : formatSignedPercent(pnl.daily_pct),
-      footer: nonTradingDay ? "Heute" : "24h",
+      status: pnlStatus(pnl.daily_eur, degraded),
+      line1: formatSignedEuro(pnl.daily_eur),
+      line2: formatSignedPercent(pnl.daily_pct),
+      footer: nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
     trades_today: {
@@ -2598,6 +2650,7 @@ function buildNoahTiles(summary) {
 export {
   buildNoahSummary,
   buildNoahSummaryFromObserverLive,
+  buildNoahSummaryFromStreamdeckTiles,
   buildNoahTiles,
   portfolioWeekPnlEur,
   portfolioWeekPnlPct
