@@ -48,6 +48,19 @@ export type MonitorState = {
 export const BRIDGE_URL = process.env.CODEX_MONITOR_URL || "http://127.0.0.1:4567/state";
 export const POLL_INTERVAL_MS = 1_000;
 
+export async function cycleNoahMarketView(): Promise<void> {
+  const response = await fetch(new URL("/noah/market/next", BRIDGE_URL).toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: "{}"
+  });
+  if (!response.ok) {
+    throw new Error(`Noah market view cycle failed: HTTP ${response.status}`);
+  }
+}
+
 const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: string }> = {
   idle: { title: "IDLE", color: "#5f6368", dot: "#d0d4d9" },
   running: { title: "LAEUFT", color: "#1565c0", dot: "#6ec6ff" },

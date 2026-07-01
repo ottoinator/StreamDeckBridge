@@ -89,6 +89,7 @@ test("Noah streamdeck tile contract drives PnL, trades, cycle, and live markets 
   const summary = buildNoahSummaryFromStreamdeckTiles({
     contract_version: "streamdeck_tiles_v1",
     generated_at_utc: "2026-06-30T18:22:55Z",
+    market: "combined",
     active_market: "us",
     active_market_status: "open",
     active_markets: ["us", "crypto"],
@@ -131,6 +132,61 @@ test("Noah streamdeck tile contract drives PnL, trades, cycle, and live markets 
   assert.equal(tiles.find(tile => tile.key === "weekly_pnl").line1, "+343,84 EUR");
   assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close 2");
   assert.equal(tiles.find(tile => tile.key === "live_markets").line1, "US CR");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").footer, "View COMB");
+});
+
+test("Noah live-market tile reflects selected single-market view without changing trading truth", () => {
+  const summary = buildNoahSummaryFromStreamdeckTiles({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-07-01T09:00:00Z",
+    market: "prediction_markets",
+    active_market: "prediction_markets",
+    active_market_status: "stale",
+    active_markets: [],
+    cycle: {
+      market: "prediction_markets",
+      market_label: "PM",
+      next_cycle_ts_utc: null,
+      next_cycle_eta_seconds: null,
+      cycle_interval_minutes: 10,
+      trading: false
+    },
+    pnl: {
+      daily_eur: 0,
+      daily_pct: 0,
+      weekly_eur: 0,
+      weekly_pct: 0
+    },
+    trades_today: {
+      open: 0,
+      closed: 0
+    },
+    live: {
+      trading_markets: [],
+      trading_products: [],
+      configured_markets: ["PM"],
+      configured_products: ["PM"]
+    },
+    markets: {
+      prediction_markets: {
+        market: "prediction_markets",
+        label: "PM",
+        product: "PM",
+        trading: false,
+        market_session_status: "stale"
+      }
+    }
+  });
+
+  assert.equal(summary.selected_market, "prediction_markets");
+  assert.equal(summary.market_closed, true);
+  const tiles = buildNoahTiles(summary);
+  const liveTile = tiles.find(tile => tile.key === "live_markets");
+  assert.equal(liveTile.status, "idle");
+  assert.equal(liveTile.line1, "-");
+  assert.equal(liveTile.footer, "PM");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "0,00 EUR");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Geschlossen");
 });
 
 test("Noah daily and weekly PnL remain visible when no market is currently trading", () => {
@@ -192,4 +248,3 @@ test("Noah cycle tile uses compact ETA when the absolute cycle timestamp is stal
   assert.notEqual(cycleTile.line1, "--:--");
   assert.equal(cycleTile.footer, "Naechste");
 });
-

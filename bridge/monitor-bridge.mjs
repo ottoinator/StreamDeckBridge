@@ -21,6 +21,7 @@ const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
 const THREADS_FILE = path.join(DATA_DIR, "threads.json");
+const NOAH_VIEW_FILE = path.join(DATA_DIR, "noah-view.json");
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const ENABLE_PROCESS_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_PROCESSES === "1";
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
@@ -38,6 +39,7 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
+const NOAH_VIEW_MARKET_ORDER = ["us", "crypto", "prediction_markets", "combined"];
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
@@ -402,6 +404,68 @@ async function ensureDataFile() {
   } catch {
     await writeFile(THREADS_FILE, "[]\n", "utf8");
   }
+
+  try {
+    await readFile(NOAH_VIEW_FILE, "utf8");
+  } catch {
+    await writeFile(
+      NOAH_VIEW_FILE,
+      `${JSON.stringify({ market: "combined", updatedAt: nowIso() }, null, 2)}\n`,
+      "utf8"
+    );
+  }
+}
+
+function normalizeNoahViewMarket(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "prediction" || raw === "predictions" || raw === "prediction_market" || raw === "prediction_markets") {
+    return "prediction_markets";
+  }
+  if (raw === "combined" || raw === "all") {
+    return "combined";
+  }
+  const normalized = normalizeNoahMarketKey(raw);
+  if (!NOAH_VIEW_MARKET_ORDER.includes(normalized)) {
+    throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
+  }
+  return normalized;
+}
+
+async function readNoahMarketView() {
+  await ensureDataFile();
+  try {
+    const parsed = JSON.parse(await readFile(NOAH_VIEW_FILE, "utf8"));
+    return {
+      market: normalizeNoahViewMarket(parsed?.market || "combined"),
+      updatedAt: parsed?.updatedAt || new Date(0).toISOString()
+    };
+  } catch {
+    const fallback = { market: "combined", updatedAt: nowIso() };
+    await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(fallback, null, 2)}\n`, "utf8");
+    return fallback;
+  }
+}
+
+async function writeNoahMarketView(market) {
+  await ensureDataFile();
+  const payload = {
+    market: normalizeNoahViewMarket(market),
+    updatedAt: nowIso()
+  };
+  await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return payload;
+}
+
+async function cycleNoahMarketView() {
+  const current = await readNoahMarketView();
+  const currentIndex = NOAH_VIEW_MARKET_ORDER.indexOf(current.market);
+  const nextMarket = NOAH_VIEW_MARKET_ORDER[(currentIndex + 1) % NOAH_VIEW_MARKET_ORDER.length];
+  const view = await writeNoahMarketView(nextMarket);
+  noahMonitorCache.cachedAt = 0;
+  noahMonitorCache.result = null;
+  noahMonitorInflight = null;
+  void broadcastStateStream().catch(() => {});
+  return view;
 }
 
 async function readSlots() {
@@ -2056,6 +2120,9 @@ function createNoahMonitorUrl(baseUrl, pathName, market = "combined") {
 
 function normalizeNoahMarketKey(value) {
   const raw = String(value || "").trim().toLowerCase();
+  if (raw === "combined" || raw === "all") {
+    return "combined";
+  }
   if (raw === "xetra" || raw === "eu_multi" || raw === "eu") {
     return "xetra";
   }
@@ -2068,11 +2135,17 @@ function normalizeNoahMarketKey(value) {
   if (raw === "crypto" || raw === "digital_assets") {
     return "crypto";
   }
+  if (raw === "prediction" || raw === "prediction_market" || raw === "prediction_markets" || raw === "kalshi") {
+    return "prediction_markets";
+  }
   return raw || "us";
 }
 
 function noahMarketLabel(value) {
   const market = normalizeNoahMarketKey(value);
+  if (market === "combined") {
+    return "COMB";
+  }
   if (market === "xetra") {
     return "EU";
   }
@@ -2085,6 +2158,9 @@ function noahMarketLabel(value) {
   if (market === "crypto") {
     return "CR";
   }
+  if (market === "prediction_markets") {
+    return "PM";
+  }
   return "US";
 }
 
@@ -2095,6 +2171,9 @@ function noahProductLabel(value) {
   }
   if (market === "crypto") {
     return "CRY";
+  }
+  if (market === "prediction_markets") {
+    return "PM";
   }
   return "EQ";
 }
@@ -2129,8 +2208,11 @@ function buildNoahSummaryFromStreamdeckTiles(payload) {
   const tradesToday = payload.trades_today || {};
   const live = payload.live || {};
   const markets = payload.markets && typeof payload.markets === "object" ? Object.values(payload.markets) : [];
+  const selectedMarket = normalizeNoahMarketKey(payload.market || payload.selected_market || "combined");
   return {
     checked_at: payload.generated_at_utc || nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
     market_closed: !(Array.isArray(live.trading_markets) && live.trading_markets.length > 0),
     cycle: cycle.market || cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et
       ? {
@@ -2162,6 +2244,7 @@ function buildNoahSummaryFromStreamdeckTiles(payload) {
 }
 
 function buildNoahSummary(statusCard, observerCard) {
+  const selectedMarket = normalizeNoahMarketKey(statusCard?.market || observerCard?.market || "combined");
   const statusMarkets = statusCard?.markets && typeof statusCard.markets === "object" ? statusCard.markets : {};
   const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
   const marketKeys = Array.from(new Set([...Object.keys(statusMarkets), ...Object.keys(observerMarkets)]));
@@ -2249,6 +2332,8 @@ function buildNoahSummary(statusCard, observerCard) {
 
   return {
     checked_at: nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
     market_closed: marketClosed,
     cycle: activeCycleRow && !marketClosed
       ? {
@@ -2278,6 +2363,7 @@ function buildNoahSummary(statusCard, observerCard) {
 }
 
 function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
+  const selectedMarket = normalizeNoahMarketKey(payload?.market || "combined");
   const markets = payload?.markets && typeof payload.markets === "object" ? payload.markets : {};
   const sessions = payload?.sessions && typeof payload.sessions === "object" ? payload.sessions : {};
   const combinedPortfolio = payload?.portfolio || {};
@@ -2384,6 +2470,8 @@ function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
 
   return {
     checked_at: payload?.generated_at_utc || nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
     cycle: activeCycleRow
       ? {
           market_label: activeCycleRow.label,
@@ -2422,7 +2510,8 @@ function liveTileStatus(summary) {
   return "idle";
 }
 
-async function probeNoahMonitor() {
+async function probeNoahMonitor(selectedMarket = "combined") {
+  const marketView = normalizeNoahViewMarket(selectedMarket);
   try {
     const baseUrl = getNoahMonitorBaseUrl();
     if (!baseUrl) {
@@ -2432,7 +2521,7 @@ async function probeNoahMonitor() {
     const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
     try {
       const streamdeckTiles = await fetchJson(
-        createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", "combined"),
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", marketView),
         { headers, timeoutMs }
       );
       const summary = buildNoahSummaryFromStreamdeckTiles(streamdeckTiles);
@@ -2444,8 +2533,8 @@ async function probeNoahMonitor() {
     }
     try {
       const [statusCard, observerCard] = await Promise.all([
-        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", "combined"), { headers, timeoutMs }),
-        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "combined"), { headers, timeoutMs })
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", marketView), { headers, timeoutMs }),
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", marketView), { headers, timeoutMs })
       ]);
       const summary = buildNoahSummary(statusCard, observerCard);
       if (summary.live?.configured_markets?.length) {
@@ -2455,7 +2544,7 @@ async function probeNoahMonitor() {
       // Fall back to the legacy observer/live path below.
     }
     const observerLive = await fetchJson(
-      createNoahMonitorUrl(baseUrl, "/api/v1/observer/live", "combined"),
+      createNoahMonitorUrl(baseUrl, "/api/v1/observer/live", marketView),
       { headers, timeoutMs }
     );
     const marketKeys = Object.keys(observerLive?.markets || {});
@@ -2483,28 +2572,41 @@ async function probeNoahMonitor() {
 }
 
 async function getCachedNoahMonitor() {
-  if (noahMonitorCache.result && Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS) {
+  const view = await readNoahMarketView();
+  if (
+    noahMonitorCache.result &&
+    noahMonitorCache.market === view.market &&
+    Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS
+  ) {
     return noahMonitorCache.result;
   }
 
-  if (noahMonitorInflight) {
+  if (noahMonitorInflight && noahMonitorInflight.market === view.market) {
     return noahMonitorInflight;
   }
 
-  noahMonitorInflight = probeNoahMonitor()
+  const inflight = probeNoahMonitor(view.market)
     .then(result => {
-      noahMonitorCache.cachedAt = Date.now();
-      noahMonitorCache.result = result;
-      noahMonitorInflight = null;
+      if (noahMonitorInflight === inflight) {
+        noahMonitorCache.cachedAt = Date.now();
+        noahMonitorCache.market = view.market;
+        noahMonitorCache.result = result;
+        noahMonitorInflight = null;
+      }
       return result;
     })
     .catch(error => {
       const fallback = makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
-      noahMonitorCache.cachedAt = Date.now();
-      noahMonitorCache.result = fallback;
-      noahMonitorInflight = null;
+      if (noahMonitorInflight === inflight) {
+        noahMonitorCache.cachedAt = Date.now();
+        noahMonitorCache.market = view.market;
+        noahMonitorCache.result = fallback;
+        noahMonitorInflight = null;
+      }
       return fallback;
     });
+  noahMonitorInflight = inflight;
+  noahMonitorInflight.market = view.market;
 
   return noahMonitorInflight;
 }
@@ -2596,6 +2698,9 @@ function buildNoahTiles(summary) {
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
   const liveProducts = compactCodes(live.trading_products || live.products, blankTileLine());
   const configuredMarkets = compactCodes(live.configured_markets, "-");
+  const selectedMarket = summary?.selected_market || "combined";
+  const selectedMarketLabel = summary?.selected_market_label || noahMarketLabel(summary?.selected_market || "combined");
+  const closedLiveFooter = selectedMarket === "combined" ? configuredMarkets : selectedMarketLabel || configuredMarkets;
 
   const tiles = {
     cycle: {
@@ -2640,7 +2745,7 @@ function buildNoahTiles(summary) {
       status: degraded && liveTileStatus(summary) !== "ok" ? "warn" : liveTileStatus(summary),
       line1: liveMarkets,
       line2: liveProducts,
-      footer: liveMarkets === "-" ? configuredMarkets : "Live",
+      footer: liveMarkets === "-" ? closedLiveFooter : `View ${selectedMarketLabel}`,
       updatedAt
     }
   };
@@ -3017,6 +3122,36 @@ async function serve() {
 
       if (req.method === "GET" && url.pathname === "/threads") {
         sendJson(res, 200, await loadExplicitThreads());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/noah/market") {
+        sendJson(res, 200, await readNoahMarketView());
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market/next") {
+        const view = await cycleNoahMarketView();
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market") {
+        const body = await parseBody(req);
+        const view = await writeNoahMarketView(body.market);
+        noahMonitorCache.cachedAt = 0;
+        noahMonitorCache.result = null;
+        noahMonitorInflight = null;
+        void broadcastStateStream().catch(() => {});
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
         return;
       }
 
