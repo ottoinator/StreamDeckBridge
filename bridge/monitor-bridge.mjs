@@ -2137,6 +2137,7 @@ function buildNoahSummaryFromStreamdeckTiles(payload) {
           market_label: cycle.market_label || noahMarketLabel(cycle.market),
           mode_label: shortCycleMode(cycle.runtime_mode || (cycle.trading ? "open" : "closed")),
           next_cycle_at: cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et || null,
+          next_cycle_eta_seconds: finiteNumber(cycle.next_cycle_eta_seconds, NaN),
           trading: Boolean(cycle.trading)
         }
       : null,
@@ -2587,8 +2588,11 @@ function buildNoahTiles(summary) {
   const trades = summary?.trades_today || {};
   const live = summary?.live || {};
   const nonTradingDay = isNoahNonTradingDay(summary);
-  const cycleHasFutureTimer = isFutureTimestamp(cycle.next_cycle_at);
-  const cycleStatus = cycle.trading ? (cycleHasFutureTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
+  const cycleEtaSeconds = finiteNumber(cycle.next_cycle_eta_seconds, NaN);
+  const cycleEtaTarget = Number.isFinite(cycleEtaSeconds) ? new Date(Date.now() + Math.max(0, cycleEtaSeconds) * 1000).toISOString() : null;
+  const cycleTimerTarget = isFutureTimestamp(cycle.next_cycle_at) ? cycle.next_cycle_at : cycleEtaTarget;
+  const cycleHasTimer = Boolean(cycleTimerTarget);
+  const cycleStatus = cycle.trading ? (cycleHasTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
   const liveProducts = compactCodes(live.trading_products || live.products, blankTileLine());
   const configuredMarkets = compactCodes(live.configured_markets, "-");
@@ -2598,9 +2602,9 @@ function buildNoahTiles(summary) {
       key: "cycle",
       label: "Noah Zyklus",
       status: cycleStatus,
-      line1: cycleHasFutureTimer ? formatCountdown(cycle.next_cycle_at) : "--:--",
+      line1: cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
       line2: blankTileLine(),
-      footer: cycleHasFutureTimer ? "Naechste" : blankTileLine(),
+      footer: cycleHasTimer ? "Naechste" : blankTileLine(),
       updatedAt
     },
     weekly_pnl: {

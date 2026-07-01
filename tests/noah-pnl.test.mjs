@@ -168,3 +168,28 @@ test("Noah daily and weekly PnL remain visible when no market is currently tradi
   assert.equal(tiles.find(tile => tile.key === "live_markets").footer, "US CR");
 });
 
+test("Noah cycle tile uses compact ETA when the absolute cycle timestamp is stale", () => {
+  const summary = buildNoahSummaryFromStreamdeckTiles({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-07-01T04:52:55Z",
+    cycle: {
+      market: "crypto",
+      market_label: "CR",
+      next_cycle_ts_utc: "2026-07-01T04:51:11Z",
+      next_cycle_eta_seconds: 42,
+      cycle_interval_minutes: 10,
+      trading: true
+    },
+    pnl: { daily_eur: 0, daily_pct: 0, weekly_eur: 0, weekly_pct: 0 },
+    trades_today: { open: 0, closed: 0 },
+    live: { trading_markets: ["CR"], trading_products: ["CRY"], configured_markets: ["US", "CR"] },
+    markets: {}
+  });
+
+  const tiles = buildNoahTiles(summary);
+  const cycleTile = tiles.find(tile => tile.key === "cycle");
+  assert.equal(cycleTile.status, "ok");
+  assert.notEqual(cycleTile.line1, "--:--");
+  assert.equal(cycleTile.footer, "Naechste");
+});
+
