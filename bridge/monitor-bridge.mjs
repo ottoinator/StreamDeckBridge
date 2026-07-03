@@ -41,8 +41,10 @@ const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTI
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
 const NOAH_VIEW_MARKET_ORDER = ["us", "crypto", "prediction_markets", "combined"];
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
+const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
+const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
 const stateStreamClients = new Set();
 function parseOptionalNumber(value, fallback = undefined) {
   const parsed = Number(value);
@@ -209,6 +211,11 @@ const noahTradeCounterCache = {
   us: { value: null, cachedAt: 0 }
 };
 let noahMonitorInflight = null;
+const codexSessionAutodetectCache = {
+  cachedAt: 0,
+  result: null,
+  inflight: null
+};
 const NOAH_MONITOR_DEFAULTS = {
   host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || (AGENT_REMOTE_DEFAULTS.noah.kind === "ssh-json" ? AGENT_REMOTE_DEFAULTS.noah.host : "ocvps"),
   command:
@@ -1129,26 +1136,50 @@ function parseCodexSessionState(raw, filePath, mtimeMs) {
 }
 
 async function discoverActiveCodexSessions() {
-  const files = (await listCodexSessionFiles()).slice(0, 30);
-  const sessions = [];
-  for (const file of files) {
-    try {
-      const raw = await readFile(file.path, "utf8");
-      const state = parseCodexSessionState(raw, file.path, file.mtimeMs);
-      if (state) {
-        sessions.push(state);
+  if (
+    codexSessionAutodetectCache.result &&
+    Date.now() - codexSessionAutodetectCache.cachedAt <= CODEX_SESSION_AUTODETECT_TTL_MS
+  ) {
+    return codexSessionAutodetectCache.result;
+  }
+  if (codexSessionAutodetectCache.inflight) {
+    return codexSessionAutodetectCache.inflight;
+  }
+
+  const inflight = (async () => {
+    const files = (await listCodexSessionFiles()).slice(0, 30);
+    const sessions = [];
+    for (const file of files) {
+      try {
+        const raw = await readFile(file.path, "utf8");
+        const state = parseCodexSessionState(raw, file.path, file.mtimeMs);
+        if (state) {
+          sessions.push(state);
+        }
+      } catch {
       }
-    } catch {
+    }
+    return sessions.sort((left, right) => {
+      const leftStarted = Date.parse(left.startedAt || left.updatedAt || nowIso());
+      const rightStarted = Date.parse(right.startedAt || right.updatedAt || nowIso());
+      if (leftStarted !== rightStarted) {
+        return leftStarted - rightStarted;
+      }
+      return left.threadId.localeCompare(right.threadId);
+    });
+  })();
+
+  codexSessionAutodetectCache.inflight = inflight;
+  try {
+    const result = await inflight;
+    codexSessionAutodetectCache.cachedAt = Date.now();
+    codexSessionAutodetectCache.result = result;
+    return result;
+  } finally {
+    if (codexSessionAutodetectCache.inflight === inflight) {
+      codexSessionAutodetectCache.inflight = null;
     }
   }
-  return sessions.sort((left, right) => {
-    const leftStarted = Date.parse(left.startedAt || left.updatedAt || nowIso());
-    const rightStarted = Date.parse(right.startedAt || right.updatedAt || nowIso());
-    if (leftStarted !== rightStarted) {
-      return leftStarted - rightStarted;
-    }
-    return left.threadId.localeCompare(right.threadId);
-  });
 }
 
 function overlayAutodetectedSessions(slots, explicitThreads, discoveredSessions) {
@@ -3089,7 +3120,7 @@ async function serve() {
   await ensureDataFile();
   const uiTick = setInterval(() => {
     void broadcastStateStream().catch(() => {});
-  }, 1_000);
+  }, STATE_STREAM_BROADCAST_MS);
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
