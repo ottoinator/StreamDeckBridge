@@ -189,6 +189,58 @@ test("Noah live-market tile reflects selected single-market view without changin
   assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Geschlossen");
 });
 
+test("Noah zero daily PnL tile stays ok while selected prediction market is trading", () => {
+  const summary = buildNoahSummaryFromStreamdeckTiles({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-07-03T11:33:57Z",
+    market: "prediction_markets",
+    active_market: "prediction_markets",
+    active_market_status: "open",
+    active_markets: ["prediction_markets"],
+    cycle: {
+      market: "prediction_markets",
+      market_label: "PM",
+      next_cycle_ts_utc: "2999-07-03T11:40:00Z",
+      next_cycle_eta_seconds: 0,
+      cycle_interval_minutes: 10,
+      trading: true
+    },
+    pnl: {
+      daily_eur: 0,
+      daily_pct: 0,
+      weekly_eur: -136.75,
+      weekly_pct: 0
+    },
+    trades_today: {
+      open: 0,
+      closed: 0
+    },
+    live: {
+      trading_markets: ["PM"],
+      trading_products: ["PM"],
+      configured_markets: ["PM"],
+      configured_products: ["PM"]
+    },
+    markets: {
+      prediction_markets: {
+        market: "prediction_markets",
+        label: "PM",
+        product: "PM",
+        trading: true,
+        market_session_status: "open",
+        market_open: true
+      }
+    }
+  });
+
+  const tiles = buildNoahTiles(summary);
+
+  assert.equal(tiles.find(tile => tile.key === "live_markets").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "0,00 EUR");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").status, "error");
+});
+
 test("Noah daily and weekly PnL remain visible when no market is currently trading", () => {
   const summary = buildNoahSummaryFromStreamdeckTiles({
     contract_version: "streamdeck_tiles_v1",

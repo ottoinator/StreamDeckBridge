@@ -2078,7 +2078,7 @@ function blankTileLine() {
   return " ";
 }
 
-function pnlStatus(value, degraded) {
+function pnlStatus(value, degraded, activeMarket = false) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) {
     return "idle";
@@ -2092,7 +2092,7 @@ function pnlStatus(value, degraded) {
   if (amount < 0) {
     return "error";
   }
-  return "idle";
+  return activeMarket ? "ok" : "idle";
 }
 
 function makeNoahProbeFallback(message) {
@@ -2727,6 +2727,7 @@ function buildNoahTiles(summary) {
   const cycleHasTimer = Boolean(cycleTimerTarget);
   const cycleStatus = cycle.trading ? (cycleHasTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
   const liveMarkets = compactCodes(live.trading_markets || live.markets);
+  const hasActiveMarket = liveTileStatus(summary) === "ok";
   const liveProducts = compactCodes(live.trading_products || live.products, blankTileLine());
   const configuredMarkets = compactCodes(live.configured_markets, "-");
   const selectedMarket = summary?.selected_market || "combined";
@@ -2746,7 +2747,7 @@ function buildNoahTiles(summary) {
     weekly_pnl: {
       key: "weekly_pnl",
       label: "Wochen PnL",
-      status: pnlStatus(pnl.weekly_eur, degraded),
+      status: pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
       line1: formatSignedEuro(pnl.weekly_eur),
       line2: formatSignedPercent(pnl.weekly_pct),
       footer: "Woche",
@@ -2755,7 +2756,7 @@ function buildNoahTiles(summary) {
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: pnlStatus(pnl.daily_eur, degraded),
+      status: pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
       line1: formatSignedEuro(pnl.daily_eur),
       line2: formatSignedPercent(pnl.daily_pct),
       footer: nonTradingDay ? "Tag" : "24h",
