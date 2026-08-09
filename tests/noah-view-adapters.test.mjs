@@ -52,6 +52,49 @@ test("Weather public keeps metrics visible but reports a blocked public monitor"
   assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Open 4");
 });
 
+test("Weather public reports the permanent Exact-8 daemon without legacy artifacts", () => {
+  const summary = buildWeatherPublicSummary({
+    monitor: {
+      kind: "paper_exact8_daemon_status_v1",
+      paper_only: true,
+      heartbeat_at_utc: "2026-08-09T18:29:45Z",
+      phase: "waiting",
+      ready: true,
+      running: true,
+      degraded: false,
+      aggregate_paper_settled: 3,
+      next_action_at_utc: "2026-08-10T14:30:00Z",
+      authorities: { order: "none", wallet: "none", promotion: "none", scheduler: "paper_daily_only" }
+    },
+    cadence: null,
+    evidence: null
+  }, NOW);
+  const tiles = buildNoahTiles(summary);
+  assert.equal(summary.view_status, "ok");
+  assert.equal(summary.view_status_label, "WAITING");
+  assert.equal(summary.cycle.next_cycle_at, "2026-08-10T14:30:00Z");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close 3");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "WAITING");
+});
+
+test("Weather public rejects authority drift in the Exact-8 daemon", () => {
+  const summary = buildWeatherPublicSummary({
+    monitor: {
+      kind: "paper_exact8_daemon_status_v1",
+      paper_only: true,
+      heartbeat_at_utc: "2026-08-09T18:29:45Z",
+      phase: "waiting",
+      ready: true,
+      running: true,
+      degraded: false,
+      authorities: { order: "none", wallet: "none", promotion: "none", scheduler: "unbounded" }
+    },
+    cadence: null,
+    evidence: null
+  }, NOW);
+  assert.equal(summary.error, "Weather Public Authority blockiert");
+});
+
 test("plugin contract still contains and registers all eleven original actions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../streamdeck-plugin/com.codex.stream-monitor.sdPlugin/manifest.json", import.meta.url), "utf8"));
   const pluginSource = await readFile(new URL("../streamdeck-plugin/src/plugin.ts", import.meta.url), "utf8");

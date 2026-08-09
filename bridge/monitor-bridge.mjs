@@ -53,7 +53,7 @@ const WEATHER_PUBLIC_ARTIFACTS_ROOT = process.env.CODEX_MONITOR_WEATHER_PUBLIC_A
 );
 const WEATHER_PUBLIC_STATUS_PATH = process.env.CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH || path.join(
   os.homedir(),
-  "ops/codex-runtime/state/noah-pm-weather-phase0-8city-hourly-monitor/status.json"
+  "NoahData/paper-lane-daemon/control/control/status.json"
 );
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
 const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
@@ -2625,6 +2625,46 @@ function buildMlbEloV2Summary({ continuity, capture, paper }, now = Date.now()) 
 }
 
 function buildWeatherPublicSummary({ monitor, cadence, evidence }, now = Date.now()) {
+  if (monitor?.kind === "paper_exact8_daemon_status_v1") {
+    const authorities = monitor.authorities || {};
+    if (monitor.paper_only !== true || authorities.order !== "none" || authorities.wallet !== "none" ||
+        authorities.promotion !== "none" || authorities.scheduler !== "paper_daily_only") {
+      return makeNoahProbeFallback("Weather Public Authority blockiert");
+    }
+    const observedAt = monitor.heartbeat_at_utc || monitor.last_transition_at_utc;
+    const fresh = projectionAgeMs(observedAt, now) <= 3 * 60_000;
+    const phase = String(monitor.phase || "missing").toLowerCase();
+    const blocked = phase === "paused_requires_review" || monitor.ready !== true || monitor.running !== true;
+    const healthy = fresh && !blocked && monitor.degraded !== true;
+    const settled = Math.max(0, Number(monitor.aggregate_paper_settled || 0));
+    const warnings = {};
+    if (!fresh) warnings.freshness = "Weather Paper Lane Status ist veraltet";
+    if (blocked) warnings.runtime = String(monitor.last_error || "Weather Paper Lane blockiert");
+    if (monitor.degraded === true) warnings.runtime = String(monitor.last_error || "Weather Paper Lane braucht Aufmerksamkeit");
+    return {
+      checked_at: observedAt || nowIso(),
+      selected_market: "weather_public",
+      selected_market_label: noahMarketLabel("weather_public"),
+      market_closed: false,
+      cycle: {
+        market_label: "WEATHER",
+        mode_label: blocked ? "Blocked" : monitor.degraded === true ? "Attention" : phase === "waiting" ? "Waiting" : "Running",
+        next_cycle_at: monitor.next_action_at_utc || null,
+        trading: healthy
+      },
+      pnl: { daily_eur: settled === 0 ? 0 : Number.NaN, daily_pct: Number.NaN, weekly_eur: settled === 0 ? 0 : Number.NaN, weekly_pct: Number.NaN, currency: "USD" },
+      trades_today: { open: 0, closed: settled },
+      live: {
+        configured_markets: ["WEATHER"],
+        configured_products: ["PUBLIC"],
+        trading_markets: healthy ? ["WEATHER"] : [],
+        trading_products: healthy ? ["PUBLIC"] : []
+      },
+      warnings,
+      view_status: blocked ? "error" : healthy ? "ok" : "warn",
+      view_status_label: blocked ? "BLOCKED" : healthy ? (phase === "waiting" ? "WAITING" : "RUNNING") : fresh ? "ATTENTION" : "STALE"
+    };
+  }
   if (!monitor || !cadence || !evidence) {
     return makeNoahProbeFallback("Weather Public Status fehlt");
   }
@@ -2700,8 +2740,11 @@ async function probeNoahMonitor(selectedMarket = "combined") {
     return buildMlbEloV2Summary({ continuity, capture, paper });
   }
   if (marketView === "weather_public") {
-    const [monitor, cadence, evidence] = await Promise.all([
-      readJsonProjection(WEATHER_PUBLIC_STATUS_PATH).catch(() => null),
+    const monitor = await readJsonProjection(WEATHER_PUBLIC_STATUS_PATH).catch(() => null);
+    if (monitor?.kind === "paper_exact8_daemon_status_v1") {
+      return buildWeatherPublicSummary({ monitor, cadence: null, evidence: null });
+    }
+    const [cadence, evidence] = await Promise.all([
       readJsonProjection(path.join(WEATHER_PUBLIC_ARTIFACTS_ROOT, "noah_pm_weather_primary_cadence.json")).catch(() => null),
       readJsonProjection(path.join(WEATHER_PUBLIC_ARTIFACTS_ROOT, "noah_pm_weather_paper_evidence_ledger.json")).catch(() => null)
     ]);
