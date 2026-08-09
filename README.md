@@ -5,7 +5,7 @@ Lokale macOS-Integration fuer Elgato Stream Deck und Codex. Die fruehere Windows
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: fokussiertes Stream-Deck-Plugin mit genau drei Kacheln fuer US Runtime, MLB Elo v2 und Weather Public
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 5 Noah-Monitor-Kacheln fuer Cycle, Wochen-PnL, Tages-PnL, Trades und Live-Maerkte
 
 Fuer Codex-Chats gibt es einen expliziten Meldeweg:
 
@@ -107,7 +107,7 @@ npm run bridge
 ```
 
 5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex Monitor` auf ein Profil ziehen.
-   Verfuegbar sind ausschliesslich `US Runtime`, `MLB Elo v2` und `Weather Public`.
+   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4`, `Noah Light`, `Carmen Light` sowie die Noah-Kacheln fuer Cycle, Wochen-PnL, Tages-PnL, Trades Heute und Live-Maerkte.
 
 ## Autostart auf macOS
 
@@ -285,22 +285,21 @@ Mehr Details und die empfohlene Architektur:
 docs/openai-agent-activity.md
 ```
 
-## Operator-Kacheln
+## Noah-Monitor-Kacheln
 
-Das Plugin stellt genau drei read-only Kacheln bereit:
+Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
 
-- `US Runtime`: liest den oeffentlichen Companion-Status und akzeptiert ausschliesslich den kanonischen Markt `us`.
-- `MLB Elo v2`: liest die lokalen, paper-only Continuity-, Capture- und Paper-Projektionen der v2-Confirmatory-Lane.
-- `Weather Public`: zeigt den Status der oeffentlichen AWC-METAR-/NWS-Lane und markiert stale, blocked oder fehlende Statusdaten fail-closed.
+- `Noah Cycle`: zeigt den naechsten Zyklus des aktiven oder naechsten offenen Noah-Markts
+- `Noah Weekly PnL`: zeigt die kombinierte Wochen-PnL aus Noahs Portfolio-/Trade-Truth
+- `Noah Daily PnL`: zeigt die Tages-PnL; an echten Nicht-Handelstagen wird kein alter Tageswert ausgespielt
+- `Noah Trades Today`: zeigt offene und geschlossene Trades des aktuellen Trade-Days
+- `Noah Live Markets`: zeigt aktuell handelnde Maerkte und Produktfamilien, z.B. `US`, `EU`, `JP`, `IF` oder `CR` sowie `EQ`, `FUT` oder `CRY`
 
-Es gibt keine Markt-Auswahl, keine Umschaltaktion und keine aggregierten PnL-/Trade-Kacheln mehr. MLB Elo v2 und Weather sind reine Beobachtungsflaechen ohne Order-, Wallet- oder Promotion-Autoritaet.
+Ein Druck auf `Noah Live Markets` schaltet die Noah-Kacheln read-only durch diese Ansicht: `US -> Crypto -> Prediction -> Combined -> US`. Die Auswahl wird lokal in `noah-view.json` gespeichert und setzt nur den Companion-API-Query-Parameter `market`; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade.
 
-Optionale Pfad-Overrides fuer die Bridge:
+Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen. US, EU, Japan, Index-Futures, Crypto und Prediction Markets werden aus dem Companion-Marktvertrag gelesen; geschlossene oder stale Maerkte bleiben konfiguriert sichtbar, zaehlen aber nicht als live/trading.
 
-```text
-CODEX_MONITOR_MLB_ELO_V2_ROOT
-CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH
-```
+Die Wochen-PnL-Kachel behandelt `weekly_pnl_eur: 0` als autoritativen aktuellen Wochenwert. Sie darf nicht auf `realized_pnl_eur_total` zurueckfallen, weil dieser Wert markt- oder ledgeruebergreifend alte realisierte PnL enthalten kann.
 
 ## Ueber die Bridge starten
 

@@ -4,11 +4,10 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.CODEX_MONITOR_PORT || 4567);
 const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
-const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function getDefaultDataDir() {
   if (process.platform === "darwin") {
@@ -22,6 +21,7 @@ const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
 const THREADS_FILE = path.join(DATA_DIR, "threads.json");
+const NOAH_VIEW_FILE = path.join(DATA_DIR, "noah-view.json");
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const ENABLE_PROCESS_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_PROCESSES === "1";
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
@@ -39,18 +39,10 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
-const OPERATOR_TILE_ORDER = ["us_runtime", "mlb_elo_v2", "weather_public"];
+const NOAH_VIEW_MARKET_ORDER = ["us", "crypto", "prediction_markets", "combined"];
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
-const MLB_ELO_V2_ROOT = process.env.CODEX_MONITOR_MLB_ELO_V2_ROOT || path.resolve(
-  ROOT_DIR,
-  "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v1"
-);
-const WEATHER_PUBLIC_STATUS_PATH = process.env.CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH || path.join(
-  os.homedir(),
-  "ops/codex-runtime/state/noah-pm-weather-phase0-8city-hourly-monitor/status.json"
-);
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
 const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
 const stateStreamClients = new Set();
@@ -420,6 +412,67 @@ async function ensureDataFile() {
     await writeFile(THREADS_FILE, "[]\n", "utf8");
   }
 
+  try {
+    await readFile(NOAH_VIEW_FILE, "utf8");
+  } catch {
+    await writeFile(
+      NOAH_VIEW_FILE,
+      `${JSON.stringify({ market: "combined", updatedAt: nowIso() }, null, 2)}\n`,
+      "utf8"
+    );
+  }
+}
+
+function normalizeNoahViewMarket(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "prediction" || raw === "predictions" || raw === "prediction_market" || raw === "prediction_markets") {
+    return "prediction_markets";
+  }
+  if (raw === "combined" || raw === "all") {
+    return "combined";
+  }
+  const normalized = normalizeNoahMarketKey(raw);
+  if (!NOAH_VIEW_MARKET_ORDER.includes(normalized)) {
+    throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
+  }
+  return normalized;
+}
+
+async function readNoahMarketView() {
+  await ensureDataFile();
+  try {
+    const parsed = JSON.parse(await readFile(NOAH_VIEW_FILE, "utf8"));
+    return {
+      market: normalizeNoahViewMarket(parsed?.market || "combined"),
+      updatedAt: parsed?.updatedAt || new Date(0).toISOString()
+    };
+  } catch {
+    const fallback = { market: "combined", updatedAt: nowIso() };
+    await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(fallback, null, 2)}\n`, "utf8");
+    return fallback;
+  }
+}
+
+async function writeNoahMarketView(market) {
+  await ensureDataFile();
+  const payload = {
+    market: normalizeNoahViewMarket(market),
+    updatedAt: nowIso()
+  };
+  await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return payload;
+}
+
+async function cycleNoahMarketView() {
+  const current = await readNoahMarketView();
+  const currentIndex = NOAH_VIEW_MARKET_ORDER.indexOf(current.market);
+  const nextMarket = NOAH_VIEW_MARKET_ORDER[(currentIndex + 1) % NOAH_VIEW_MARKET_ORDER.length];
+  const view = await writeNoahMarketView(nextMarket);
+  noahMonitorCache.cachedAt = 0;
+  noahMonitorCache.result = null;
+  noahMonitorInflight = null;
+  void broadcastStateStream().catch(() => {});
+  return view;
 }
 
 async function readSlots() {
@@ -2550,7 +2603,7 @@ async function probeNoahMonitor(selectedMarket = "combined") {
 }
 
 async function getCachedNoahMonitor() {
-  const view = { market: "us" };
+  const view = await readNoahMarketView();
   if (
     noahMonitorCache.result &&
     noahMonitorCache.market === view.market &&
@@ -2735,134 +2788,11 @@ function buildNoahTiles(summary) {
   }));
 }
 
-function operatorTile(key, values = {}) {
-  const labels = {
-    us_runtime: "US Runtime",
-    mlb_elo_v2: "MLB Elo v2",
-    weather_public: "Weather Public"
-  };
-  return {
-    key,
-    label: labels[key],
-    status: "error",
-    line1: "Keine Daten",
-    line2: "Quelle fehlt",
-    footer: "Read-only",
-    updatedAt: nowIso(),
-    ...values
-  };
-}
-
-function projectionAgeMs(value, now = Date.now()) {
-  const timestamp = Date.parse(String(value || ""));
-  return Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : Number.POSITIVE_INFINITY;
-}
-
-function compactReason(value, fallback = "Wartet") {
-  const normalized = String(value || "")
-    .replace(/^command_failed:/, "")
-    .replace(/[_:]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return titleCaseValue(normalized || fallback).slice(0, 18);
-}
-
-function buildOperatorTiles({ usRuntime, mlbContinuity, mlbCapture, mlbPaper, weatherStatus }, now = Date.now()) {
-  const usMarketRaw = String(usRuntime?.market || "").trim();
-  const usCanonicalRaw = String(usRuntime?.market_registry?.canonical_market_key || "").trim();
-  const usOnly = usMarketRaw.length > 0 && usCanonicalRaw.length > 0 &&
-    normalizeNoahMarketKey(usMarketRaw) === "us" && normalizeNoahMarketKey(usCanonicalRaw) === "us";
-  const usSession = usRuntime?.market_session || {};
-  const usOnline = String(usRuntime?.status || "").toLowerCase() === "online";
-  const usMode = String(usSession.runtime_mode || "IDLE").toUpperCase();
-  const usSessionStatus = String(usSession.market_session_status || "closed").toLowerCase();
-  const usTile = operatorTile("us_runtime", usOnly && usOnline
-    ? {
-        status: usSession.market_open ? "ok" : "idle",
-        line1: usSession.market_open ? "OPEN" : usSessionStatus === "closed" ? "CLOSED" : usSessionStatus.toUpperCase(),
-        line2: usMode.slice(0, 18),
-        footer: `US · ${usSession.trade_day || "paper"}`.slice(0, 18),
-        updatedAt: nowIso()
-      }
-    : {
-        line1: usOnly ? "OFFLINE" : "BLOCKED",
-        line2: usOnly ? "Companion" : "Nicht US",
-        footer: "US only"
-      });
-
-  const mlbObservedAt = mlbContinuity?.observed_at_utc || mlbPaper?.observed_at_utc || mlbCapture?.observed_at_utc;
-  const mlbFresh = projectionAgeMs(mlbObservedAt, now) <= 10 * 60_000;
-  const mlbAuthoritySafe = [mlbContinuity, mlbCapture, mlbPaper].every(value =>
-    value?.paper_only === true && value?.live_trading_authority === false && value?.order_authority === "none"
-  );
-  const mlbHealthy = mlbContinuity?.status === "ok" && mlbContinuity?.operator_state === "running" &&
-    mlbCapture?.circuit_open === false && mlbPaper?.epoch_status === "active" && mlbPaper?.ledger_integrity === "pass";
-  const mlbTile = operatorTile("mlb_elo_v2", mlbAuthoritySafe && mlbFresh
-    ? {
-        status: mlbHealthy ? "ok" : "warn",
-        line1: mlbHealthy ? "RUNNING" : "ATTENTION",
-        line2: `C ${Number(mlbCapture?.capture_count || 0)} · S ${Number(mlbPaper?.settled_count || 0)}`,
-        footer: `Paper · ${formatAgeCompact(projectionAgeMs(mlbObservedAt, now))}`.slice(0, 18),
-        updatedAt: mlbObservedAt || nowIso()
-      }
-    : {
-        line1: mlbAuthoritySafe ? "STALE" : "BLOCKED",
-        line2: mlbAuthoritySafe ? "Status alt" : "Authority",
-        footer: "Paper only"
-      });
-
-  const weatherObservedAt = weatherStatus?.observed_at_utc;
-  const weatherFresh = projectionAgeMs(weatherObservedAt, now) <= 90 * 60_000;
-  const weatherSafe = weatherStatus?.paper_only === true && Number(weatherStatus?.api_cost_usd || 0) === 0;
-  const weatherState = String(weatherStatus?.status || "missing").toLowerCase();
-  const weatherBlocked = weatherState === "blocked" || weatherState === "error" || weatherState === "failed";
-  const weatherHealthy = ["ok", "healthy", "running", "done"].includes(weatherState);
-  const weatherTile = operatorTile("weather_public", weatherSafe && weatherFresh
-    ? {
-        status: weatherBlocked ? "error" : weatherHealthy ? "ok" : "warn",
-        line1: weatherBlocked ? "BLOCKED" : weatherHealthy ? "RUNNING" : weatherState.toUpperCase().slice(0, 18),
-        line2: compactReason(weatherStatus?.reason, weatherHealthy ? "Public Feed" : "Wartet"),
-        footer: "AWC + NWS",
-        updatedAt: weatherObservedAt || nowIso()
-      }
-    : {
-        line1: weatherSafe ? "STALE" : "BLOCKED",
-        line2: weatherSafe ? "Monitor alt" : "Public source",
-        footer: "AWC + NWS"
-      });
-
-  const tiles = { us_runtime: usTile, mlb_elo_v2: mlbTile, weather_public: weatherTile };
-  return OPERATOR_TILE_ORDER.map(key => tiles[key]);
-}
-
-async function readJsonProjection(filePath) {
-  return JSON.parse(await readFile(filePath, "utf8"));
-}
-
-async function loadOperatorTiles() {
-  const usStatusUrl = buildUrl(
-    process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL || DEFAULT_NOAH_MONITOR_BASE_URL,
-    "/api/v1/status/openai-activity"
-  );
-  const [usRuntime, mlbContinuity, mlbCapture, mlbPaper, weatherStatus] = await Promise.all([
-    fetchJson(usStatusUrl, {
-      headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"),
-      timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 4_000)
-    }).catch(() => null),
-    readJsonProjection(path.join(MLB_ELO_V2_ROOT, "runtime/continuity-status.json")).catch(() => null),
-    readJsonProjection(path.join(MLB_ELO_V2_ROOT, "capture/status.json")).catch(() => null),
-    readJsonProjection(path.join(MLB_ELO_V2_ROOT, "paper/status.json")).catch(() => null),
-    readJsonProjection(WEATHER_PUBLIC_STATUS_PATH).catch(() => null)
-  ]);
-  return buildOperatorTiles({ usRuntime, mlbContinuity, mlbCapture, mlbPaper, weatherStatus });
-}
-
 export {
   buildNoahSummary,
   buildNoahSummaryFromObserverLive,
   buildNoahSummaryFromStreamdeckTiles,
   buildNoahTiles,
-  buildOperatorTiles,
   portfolioWeekPnlEur,
   portfolioWeekPnlPct
 };
@@ -2976,12 +2906,12 @@ async function setThreadName(threadId, label) {
 }
 
 async function buildMonitorState(options = {}) {
-  const operatorTiles = await loadOperatorTiles();
+  const noahSummary = options.awaitNoahMonitor ? await getCachedNoahMonitor() : getImmediateNoahMonitor();
   return {
     slots: await loadEffectiveSlots(),
     agents: await loadEffectiveAgents(),
     threads: await loadExplicitThreads(),
-    noahTiles: operatorTiles
+    noahTiles: buildNoahTiles(noahSummary)
   };
 }
 
@@ -3224,6 +3154,36 @@ async function serve() {
 
       if (req.method === "GET" && url.pathname === "/threads") {
         sendJson(res, 200, await loadExplicitThreads());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/noah/market") {
+        sendJson(res, 200, await readNoahMarketView());
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market/next") {
+        const view = await cycleNoahMarketView();
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market") {
+        const body = await parseBody(req);
+        const view = await writeNoahMarketView(body.market);
+        noahMonitorCache.cachedAt = 0;
+        noahMonitorCache.result = null;
+        noahMonitorInflight = null;
+        void broadcastStateStream().catch(() => {});
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
         return;
       }
 

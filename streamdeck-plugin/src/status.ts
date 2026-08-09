@@ -1,7 +1,7 @@
 export type SlotStatus = "idle" | "running" | "needs_input" | "error" | "done";
 export type AgentStatus = "online" | "attention" | "offline";
 export type NoahTileStatus = "idle" | "ok" | "warn" | "error";
-export type NoahTileKey = "us_runtime" | "mlb_elo_v2" | "weather_public";
+export type NoahTileKey = "cycle" | "weekly_pnl" | "daily_pnl" | "trades_today" | "live_markets";
 
 export type SlotState = {
   slot: number;
@@ -48,6 +48,19 @@ export type MonitorState = {
 export const BRIDGE_URL = process.env.CODEX_MONITOR_URL || "http://127.0.0.1:4567/state";
 export const POLL_INTERVAL_MS = 1_000;
 
+export async function cycleNoahMarketView(): Promise<void> {
+  const response = await fetch(new URL("/noah/market/next", BRIDGE_URL).toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: "{}"
+  });
+  if (!response.ok) {
+    throw new Error(`Noah market view cycle failed: HTTP ${response.status}`);
+  }
+}
+
 const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: string }> = {
   idle: { title: "IDLE", color: "#5f6368", dot: "#d0d4d9" },
   running: { title: "LAEUFT", color: "#1565c0", dot: "#6ec6ff" },
@@ -62,7 +75,7 @@ const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dim
   offline: { title: "OFFLINE", color: "#7f1d1d", dimColor: "#4d1010", dot: "#fca5a5", dimDot: "#5f1414" }
 };
 
-const NOAH_TILE_ORDER: NoahTileKey[] = ["us_runtime", "mlb_elo_v2", "weather_public"];
+const NOAH_TILE_ORDER: NoahTileKey[] = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
 const NOAH_TILE_META: Record<NoahTileStatus, { title: string; color: string; dot: string }> = {
   idle: { title: "BEREIT", color: "#4b5563", dot: "#cbd5e1" },
   ok: { title: "OK", color: "#166534", dot: "#86efac" },
@@ -99,9 +112,11 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
 
 export function defaultNoahTile(key: NoahTileKey): NoahTileState {
   const labels: Record<NoahTileKey, string> = {
-    us_runtime: "US Runtime",
-    mlb_elo_v2: "MLB Elo v2",
-    weather_public: "Weather Public"
+    cycle: "Noah Zyklus",
+    weekly_pnl: "Wochen PnL",
+    daily_pnl: "Tages PnL",
+    trades_today: "Trades Heute",
+    live_markets: "Live Markt"
   };
   return {
     key,
