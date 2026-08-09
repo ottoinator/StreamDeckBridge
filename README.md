@@ -289,15 +289,15 @@ docs/openai-agent-activity.md
 
 Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
 
-- `Noah Cycle`: zeigt den naechsten Zyklus des aktiven oder naechsten offenen Noah-Markts
+- `Noah Cycle`: zeigt den naechsten Zyklus der ausgewaehlten Noah-View
 - `Noah Weekly PnL`: zeigt die kombinierte Wochen-PnL aus Noahs Portfolio-/Trade-Truth
 - `Noah Daily PnL`: zeigt die Tages-PnL; an echten Nicht-Handelstagen wird kein alter Tageswert ausgespielt
 - `Noah Trades Today`: zeigt offene und geschlossene Trades des aktuellen Trade-Days
-- `Noah Live Markets`: zeigt aktuell handelnde Maerkte und Produktfamilien, z.B. `US`, `EU`, `JP`, `IF` oder `CR` sowie `EQ`, `FUT` oder `CRY`
+- `Noah Live Markets`: zeigt die ausgewaehlte View und deren Runtime-Zustand
 
-Ein Druck auf `Noah Live Markets` schaltet die Noah-Kacheln read-only durch diese Ansicht: `US -> Crypto -> Prediction -> Combined -> US`. Die Auswahl wird lokal in `noah-view.json` gespeichert und setzt nur den Companion-API-Query-Parameter `market`; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade.
+Ein Druck auf `Noah Live Markets` schaltet alle fuenf Noah-Kacheln read-only durch diese Ansichten: `US Runtime (Default Lane) -> MLB Elo v2 -> Weather Public -> US Runtime`. Die Auswahl wird lokal in `noah-view.json` gespeichert; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade. Alte gespeicherte Ansichten wie Crypto, Prediction oder Combined werden beim Lesen sicher auf US Runtime migriert.
 
-Die Bridge zieht dafuer Noah-Daten direkt aus Noahs Companion API. Der normale Read-Pfad fuer die Stream-Deck-Kacheln nutzt damit keinen SSH-Hop mehr, sodass kurze SSH-/Shell-Haenger nicht mehr als gelbe Noah-Kacheln durchschlagen. US, EU, Japan, Index-Futures, Crypto und Prediction Markets werden aus dem Companion-Marktvertrag gelesen; geschlossene oder stale Maerkte bleiben konfiguriert sichtbar, zaehlen aber nicht als live/trading.
+US Runtime kommt aus Noahs oeffentlichem Companion-StreamDeck-Vertrag. MLB Elo v2 liest ausschliesslich die lokalen paper-only Continuity-, Capture- und Ledger-Projektionen. Weather Public liest die Docker-Cadence, das separate paper-only Weather-Evidence-Ledger und den AWC/NWS-Monitorstatus. Fehlende, veraltete oder authority-unsichere Projektionen werden sichtbar blockiert; es gibt keinen Rueckfall auf andere Maerkte oder aggregierte PnL.
 
 Die Wochen-PnL-Kachel behandelt `weekly_pnl_eur: 0` als autoritativen aktuellen Wochenwert. Sie darf nicht auf `realized_pnl_eur_total` zurueckfallen, weil dieser Wert markt- oder ledgeruebergreifend alte realisierte PnL enthalten kann.
 

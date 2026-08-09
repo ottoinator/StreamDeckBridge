@@ -1,4 +1,5 @@
 node_modules/
+.qa/
 _refs/
 *.log
 *.tmp

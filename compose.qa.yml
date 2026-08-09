@@ -1,0 +1,11 @@
+services:
+  qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.qa
+    environment:
+      CODEX_MONITOR_MLB_ELO_V2_ROOT: /fixtures/mlb
+      CODEX_MONITOR_WEATHER_PUBLIC_ARTIFACTS_ROOT: /fixtures/weather
+      CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH: /fixtures/weather-monitor.json
+    volumes:
+      - ./.qa:/app/.qa
