@@ -3,5 +3,6 @@ _refs/
 *.log
 *.tmp
 dist/
+.qa/
 .DS_Store
 bridge.runtime.json

@@ -1,0 +1,8 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /workspace
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+
+CMD ["sh", "-lc", "npm run build:plugin && npm test"]

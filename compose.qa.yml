@@ -1,0 +1,17 @@
+services:
+  qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.qa
+    image: streamdeckbridge-qa:local
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    volumes:
+      - ./.qa:/workspace/.qa

@@ -2,7 +2,7 @@
   "Name": "Codex Monitor",
   "Version": "0.1.0.0",
   "Author": "OpenAI Codex",
-  "Description": "Monitors Codex jobs and Noah runtime tiles via a local bridge and displays clear status colors on the Stream Deck.",
+  "Description": "Shows the US runtime, MLB Elo v2, and the public-source Weather lane.",
   "Category": "Codex Monitor",
   "CategoryIcon": "imgs/plugin/category-icon",
   "Icon": "imgs/plugin/marketplace",
@@ -28,100 +28,10 @@
   },
   "Actions": [
     {
-      "Name": "Codex Slot 1",
-      "UUID": "com.codex.stream-monitor.slot1",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the status of Codex monitor slot 1.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Codex Slot 2",
-      "UUID": "com.codex.stream-monitor.slot2",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the status of Codex monitor slot 2.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Codex Slot 3",
-      "UUID": "com.codex.stream-monitor.slot3",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the status of Codex monitor slot 3.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Codex Slot 4",
-      "UUID": "com.codex.stream-monitor.slot4",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the status of Codex monitor slot 4.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Noah Light",
-      "UUID": "com.codex.stream-monitor.agent.noah",
-      "Icon": "imgs/actions/agent",
-      "Tooltip": "Shows whether Noah is active.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/agent",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Carmen Light",
-      "UUID": "com.codex.stream-monitor.agent.carmen",
-      "Icon": "imgs/actions/agent",
-      "Tooltip": "Shows whether Carmen is active.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/agent",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Noah Cycle",
+      "Name": "US Runtime",
       "UUID": "com.codex.stream-monitor.noah.cycle",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current Noah cycle and the countdown to the next cycle.",
+      "Tooltip": "Shows the read-only US paper runtime and market-session state.",
       "Controllers": [
         "Keypad"
       ],
@@ -133,10 +43,10 @@
       ]
     },
     {
-      "Name": "Noah Weekly PnL",
+      "Name": "MLB Elo v2",
       "UUID": "com.codex.stream-monitor.noah.weekly-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current weekly Noah PnL.",
+      "Tooltip": "Shows the paper-only MLB Elo v2 runtime, captures, and settlements.",
       "Controllers": [
         "Keypad"
       ],
@@ -148,40 +58,10 @@
       ]
     },
     {
-      "Name": "Noah Daily PnL",
+      "Name": "Weather Public",
       "UUID": "com.codex.stream-monitor.noah.daily-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current daily Noah PnL.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Noah Trades Today",
-      "UUID": "com.codex.stream-monitor.noah.trades-today",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows how many trades are open and closed today.",
-      "Controllers": [
-        "Keypad"
-      ],
-      "States": [
-        {
-          "Image": "imgs/actions/slot",
-          "TitleAlignment": "middle"
-        }
-      ]
-    },
-    {
-      "Name": "Noah Live Markets",
-      "UUID": "com.codex.stream-monitor.noah.live-markets",
-      "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows which markets and product families are live and trading.",
+      "Tooltip": "Shows the public AWC and NWS Weather lane, including stale and blocked states.",
       "Controllers": [
         "Keypad"
       ],

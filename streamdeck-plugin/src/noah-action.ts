@@ -8,11 +8,9 @@ type VisibleAction = KeyAction<Record<string, never>>;
 export abstract class BaseNoahAction extends SingletonAction<Record<string, never>> {
   private static readonly visibleActions = new Map<NoahTileKey, Map<string, VisibleAction>>();
   private static currentTiles = [
-    defaultNoahTile("cycle"),
-    defaultNoahTile("weekly_pnl"),
-    defaultNoahTile("daily_pnl"),
-    defaultNoahTile("trades_today"),
-    defaultNoahTile("live_markets")
+    defaultNoahTile("us_runtime"),
+    defaultNoahTile("mlb_elo_v2"),
+    defaultNoahTile("weather_public")
   ];
 
   readonly tileKey: NoahTileKey;

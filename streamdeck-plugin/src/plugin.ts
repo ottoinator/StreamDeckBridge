@@ -1,44 +1,21 @@
 import streamDeck from "@elgato/streamdeck";
 
-import { CarmenLightAction } from "./actions/carmen-light";
-import { NoahCycleAction } from "./actions/noah-cycle";
-import { NoahDailyPnlAction } from "./actions/noah-daily-pnl";
-import { NoahLightAction } from "./actions/noah-light";
-import { NoahLiveMarketsAction } from "./actions/noah-live-markets";
-import { NoahTradesTodayAction } from "./actions/noah-trades-today";
-import { NoahWeeklyPnlAction } from "./actions/noah-weekly-pnl";
-import { Slot1Action } from "./actions/slot-1";
-import { Slot2Action } from "./actions/slot-2";
-import { Slot3Action } from "./actions/slot-3";
-import { Slot4Action } from "./actions/slot-4";
-import { BaseAgentAction } from "./agent-action";
+import { UsRuntimeAction } from "./actions/noah-cycle";
+import { WeatherPublicAction } from "./actions/noah-daily-pnl";
+import { MlbEloV2Action } from "./actions/noah-weekly-pnl";
 import { BaseNoahAction } from "./noah-action";
-import { BaseSlotAction } from "./slot-action";
 import { BRIDGE_URL, normalizeState, offlineState } from "./status";
 
 streamDeck.logger.setLevel("info");
-const AGENT_ANIMATION_INTERVAL_MS = 250;
 const BRIDGE_EVENTS_URL = process.env.CODEX_MONITOR_EVENTS_URL || new URL("/events", BRIDGE_URL).toString();
 
-streamDeck.actions.registerAction(new Slot1Action());
-streamDeck.actions.registerAction(new Slot2Action());
-streamDeck.actions.registerAction(new Slot3Action());
-streamDeck.actions.registerAction(new Slot4Action());
-streamDeck.actions.registerAction(new NoahLightAction());
-streamDeck.actions.registerAction(new CarmenLightAction());
-streamDeck.actions.registerAction(new NoahCycleAction());
-streamDeck.actions.registerAction(new NoahWeeklyPnlAction());
-streamDeck.actions.registerAction(new NoahDailyPnlAction());
-streamDeck.actions.registerAction(new NoahTradesTodayAction());
-streamDeck.actions.registerAction(new NoahLiveMarketsAction());
+streamDeck.actions.registerAction(new UsRuntimeAction());
+streamDeck.actions.registerAction(new MlbEloV2Action());
+streamDeck.actions.registerAction(new WeatherPublicAction());
 
 async function applyMonitorState(payload: unknown) {
   const state = normalizeState(payload);
-  await Promise.all([
-    BaseSlotAction.updateSlots(state.slots),
-    BaseAgentAction.updateAgents(state.agents),
-    BaseNoahAction.updateTiles(state.noahTiles)
-  ]);
+  await BaseNoahAction.updateTiles(state.noahTiles);
 }
 
 function wait(ms: number): Promise<void> {
@@ -122,7 +99,3 @@ async function connectBridgeStream() {
 
 streamDeck.connect();
 void connectBridgeStream();
-
-setInterval(() => {
-  void BaseAgentAction.refreshVisibleActions();
-}, AGENT_ANIMATION_INTERVAL_MS);

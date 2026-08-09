@@ -1,0 +1,5 @@
+node_modules
+.git
+.qa
+logs
+_refs
