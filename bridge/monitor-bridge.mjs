@@ -53,7 +53,7 @@ const WEATHER_PUBLIC_ARTIFACTS_ROOT = process.env.CODEX_MONITOR_WEATHER_PUBLIC_A
 );
 const WEATHER_PUBLIC_STATUS_PATH = process.env.CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH || path.join(
   os.homedir(),
-  "NoahData/paper-lane-daemon/control/control/status.json"
+  "NoahData/paper-edge-v2/control/control/status.json"
 );
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
 const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
@@ -2637,6 +2637,9 @@ function buildWeatherPublicSummary({ monitor, cadence, evidence }, now = Date.no
     const blocked = phase === "paused_requires_review" || monitor.ready !== true || monitor.running !== true;
     const healthy = fresh && !blocked && monitor.degraded !== true;
     const settled = Math.max(0, Number(monitor.aggregate_paper_settled || 0));
+    const openPositions = Math.max(0, Number(monitor.open_paper_positions || 0));
+    const netPnlCents = Number(monitor.net_pnl_cents);
+    const windowPnl = settled === 0 ? 0 : Number.isFinite(netPnlCents) ? netPnlCents / 100 : Number.NaN;
     const warnings = {};
     if (!fresh) warnings.freshness = "Weather Paper Lane Status ist veraltet";
     if (blocked) warnings.runtime = String(monitor.last_error || "Weather Paper Lane blockiert");
@@ -2652,8 +2655,8 @@ function buildWeatherPublicSummary({ monitor, cadence, evidence }, now = Date.no
         next_cycle_at: monitor.next_action_at_utc || null,
         trading: healthy
       },
-      pnl: { daily_eur: settled === 0 ? 0 : Number.NaN, daily_pct: Number.NaN, weekly_eur: settled === 0 ? 0 : Number.NaN, weekly_pct: Number.NaN, currency: "USD" },
-      trades_today: { open: 0, closed: settled },
+      pnl: { daily_eur: windowPnl, daily_pct: Number.NaN, weekly_eur: windowPnl, weekly_pct: Number.NaN, currency: "USD" },
+      trades_today: { open: openPositions, closed: settled },
       live: {
         configured_markets: ["WEATHER"],
         configured_products: ["PUBLIC"],

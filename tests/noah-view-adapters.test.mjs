@@ -63,6 +63,8 @@ test("Weather public reports the permanent Exact-8 daemon without legacy artifac
       running: true,
       degraded: false,
       aggregate_paper_settled: 3,
+      open_paper_positions: 2,
+      net_pnl_cents: 37,
       next_action_at_utc: "2026-08-10T14:30:00Z",
       authorities: { order: "none", wallet: "none", promotion: "none", scheduler: "paper_daily_only" }
     },
@@ -73,8 +75,16 @@ test("Weather public reports the permanent Exact-8 daemon without legacy artifac
   assert.equal(summary.view_status, "ok");
   assert.equal(summary.view_status_label, "WAITING");
   assert.equal(summary.cycle.next_cycle_at, "2026-08-10T14:30:00Z");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Open 2");
   assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close 3");
+  assert.equal(summary.pnl.daily_eur, 0.37);
   assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "WAITING");
+});
+
+test("Weather public defaults to the isolated Edge v2 controller status", async () => {
+  const bridgeSource = await readFile(new URL("../bridge/monitor-bridge.mjs", import.meta.url), "utf8");
+  assert.match(bridgeSource, /NoahData\/paper-edge-v2\/control\/control\/status\.json/);
+  assert.doesNotMatch(bridgeSource, /NoahData\/paper-lane-daemon\/control\/control\/status\.json/);
 });
 
 test("Weather public rejects authority drift in the Exact-8 daemon", () => {
