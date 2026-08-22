@@ -39,7 +39,17 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
-const NOAH_VIEW_MARKET_ORDER = ["us", "mlb_elo_v2", "weather_public"];
+const NOAH_VIEW_MARKET_ORDER = ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public"];
+const MAMBA_VIEW_METADATA = {
+  mamba_transfer_52_95: {
+    label: "MAMBA 52>95",
+    laneId: "noah_us_mamba_exact6y_expanded95_whatif_v1"
+  },
+  mamba_native95: {
+    label: "MAMBA N95",
+    laneId: "noah_us_mamba_native95_exact6y_pragmatic_paper_final_fit_bundle_v2"
+  }
+};
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
@@ -233,13 +243,7 @@ const NOAH_MONITOR_DEFAULTS = {
   command:
     process.env.CODEX_MONITOR_NOAH_MONITOR_COMMAND ||
     String.raw`python3 - <<'PY'
-import json,subprocess,urllib.request
-def tok():
-    try:s=subprocess.check_output(['systemctl','cat','noah_companion_api.service'],text=True,stderr=subprocess.DEVNULL)
-    except Exception:return None
-    for line in s.splitlines():
-        if line.startswith('Environment=NOAH_COMPANION_API_TOKEN='): return line.split('=',2)[2].strip()
-    return None
+import json,urllib.request
 def get(path,t,timeout=20):
     h={'Accept':'application/json'}
     if t: h['Authorization']='Bearer '+t
@@ -253,7 +257,7 @@ def short_mode(value):
     raw=str(value or '').strip().lower()
     mapping={'morning_burst':'Burst','open_stabilization':'Stabi','early_attack':'Attack','regular_day':'RegDay','tradeable':'Trade','defensive':'Def','close_only':'Exit','idle':'Idle'}
     return mapping.get(raw, raw.replace('_',' ').title()[:8] if raw else 'Warte')
-t=tok()
+t=None
 combined = get('/api/v1/status/current?market=combined', t, timeout=20)
 intraday = get('/api/v1/intraday/today?market=combined', t, timeout=20)
 markets = list(intraday.get('available_markets') or combined.get('available_markets') or [])
@@ -439,6 +443,12 @@ function normalizeNoahViewMarket(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (["us", "us_runtime", "default", "default_lane", "combined", "all", "crypto", "prediction", "predictions", "prediction_market", "prediction_markets"].includes(raw)) {
     return "us";
+  }
+  if (["mamba_transfer", "mamba_transfer_52_95", "mamba_52_95", "mamba52", "transfer95"].includes(raw)) {
+    return "mamba_transfer_52_95";
+  }
+  if (["mamba_native", "mamba_native95", "native95", "mamba95"].includes(raw)) {
+    return "mamba_native95";
   }
   if (["mlb", "mlb_elo", "mlb_elo_v2"].includes(raw)) {
     return "mlb_elo_v2";
@@ -2191,6 +2201,12 @@ function normalizeNoahMarketKey(value) {
 
 function noahMarketLabel(value) {
   const market = normalizeNoahMarketKey(value);
+  if (market === "mamba_transfer_52_95") {
+    return MAMBA_VIEW_METADATA.mamba_transfer_52_95.label;
+  }
+  if (market === "mamba_native95") {
+    return MAMBA_VIEW_METADATA.mamba_native95.label;
+  }
   if (market === "mlb_elo_v2") {
     return "MLB V2";
   }
@@ -2220,6 +2236,9 @@ function noahMarketLabel(value) {
 
 function noahProductLabel(value) {
   const market = normalizeNoahMarketKey(value);
+  if (market === "mamba_transfer_52_95" || market === "mamba_native95") {
+    return "WHAT-IF";
+  }
   if (market === "mlb_elo_v2") {
     return "SPORT";
   }
@@ -2726,9 +2745,100 @@ function asUsRuntimeView(summary) {
   return {
     ...summary,
     selected_market: "us",
-    selected_market_label: "US RUNTIME",
+    selected_market_label: "US ORB13",
     view_status: running ? "ok" : "idle",
-    view_status_label: "DEFAULT"
+    view_status_label: "DEFAULT ORB13"
+  };
+}
+
+function isMambaView(value) {
+  return Object.prototype.hasOwnProperty.call(MAMBA_VIEW_METADATA, value);
+}
+
+function mambaPnlAmount(window) {
+  if (!window || window.available !== true) {
+    return Number.NaN;
+  }
+  const value = Number(window.pnl_eur);
+  return Number.isFinite(value) ? value : Number.NaN;
+}
+
+function mambaTradeCount(window) {
+  if (!window || window.available !== true) {
+    return null;
+  }
+  const value = Number(window.trade_count);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function buildMambaWhatIfSummary(observerCard, marketView) {
+  const laneKey = marketView === "mamba_transfer_52_95" ? "transfer52_to_95" : "native95";
+  const lane = observerCard?.mamba_challengers?.[laneKey];
+  const metadata = MAMBA_VIEW_METADATA[marketView];
+  if (!lane || typeof lane !== "object") {
+    return makeNoahProbeFallback(`${metadata.label} What-if fehlt`);
+  }
+  if (lane.pnl_kind !== "what_if") {
+    return makeNoahProbeFallback(`${metadata.label} PnL-Kind blockiert`);
+  }
+
+  const raw = lane.raw && typeof lane.raw === "object" ? lane.raw : {};
+  const normalized = lane.normalized && typeof lane.normalized === "object" ? lane.normalized : {};
+  const rawDay = mambaPnlAmount(raw.day);
+  const rawWeek = mambaPnlAmount(raw.week);
+  const normalizedDay = mambaPnlAmount(normalized.day);
+  const normalizedWeek = mambaPnlAmount(normalized.week);
+  const comparisonStatus = String(lane.comparison_status || "unavailable").trim().toLowerCase();
+  const status = String(lane.status || "unavailable").trim().toLowerCase();
+  const warnings = {};
+  if (!Number.isFinite(rawDay)) warnings.raw_day = String(raw.day?.reason || "Tages-What-if nicht verfuegbar");
+  if (!Number.isFinite(rawWeek)) warnings.raw_week = String(raw.week?.reason || "Wochen-What-if nicht verfuegbar");
+  if (!Number.isFinite(normalizedDay) || !Number.isFinite(normalizedWeek)) {
+    warnings.normalized = String(normalized.day?.reason || normalized.week?.reason || "Normalisierter Vergleich nicht verfuegbar");
+  }
+  if (!['comparable', 'complete', 'ok'].includes(comparisonStatus)) {
+    warnings.comparison = String(lane.reason || `Vergleich: ${comparisonStatus || 'unavailable'}`);
+  }
+  const blocked = ['blocked', 'error', 'failed', 'invalid'].includes(status);
+  const available = Number.isFinite(rawDay) || Number.isFinite(rawWeek);
+  const viewStatus = blocked ? "error" : available ? (Object.keys(warnings).length ? "warn" : "ok") : "warn";
+
+  return {
+    checked_at: observerCard?.generated_at_utc || observerCard?.updated_at || nowIso(),
+    selected_market: marketView,
+    selected_market_label: metadata.label,
+    market_closed: false,
+    cycle: {
+      market_label: metadata.label,
+      mode_label: status.toUpperCase().slice(0, 12) || "WHAT-IF",
+      next_cycle_at: null,
+      trading: available && !blocked
+    },
+    pnl: {
+      daily_eur: rawDay,
+      weekly_eur: rawWeek,
+      daily_pct: Number.NaN,
+      weekly_pct: Number.NaN,
+      comparison_daily_eur: normalizedDay,
+      comparison_weekly_eur: normalizedWeek,
+      kind: "what_if",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: mambaTradeCount(raw.day) },
+    live: {
+      configured_markets: [metadata.label],
+      configured_products: ["WHAT-IF"],
+      trading_markets: available && !blocked ? [metadata.label] : [],
+      trading_products: available && !blocked ? ["WHAT-IF"] : []
+    },
+    lane: {
+      id: metadata.laneId,
+      model_variant: String(lane.model_variant || metadata.label),
+      comparison_status: comparisonStatus
+    },
+    warnings,
+    view_status: viewStatus,
+    view_status_label: "WHAT-IF"
   };
 }
 
@@ -2758,8 +2868,15 @@ async function probeNoahMonitor(selectedMarket = "combined") {
     if (!baseUrl) {
       return makeNoahProbeFallback("Noah API Basis-URL fehlt");
     }
-    const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
     const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
+    if (isMambaView(marketView)) {
+      const observerCard = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
+        { timeoutMs }
+      );
+      return buildMambaWhatIfSummary(observerCard, marketView);
+    }
+    const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
     try {
       const streamdeckTiles = await fetchJson(
         createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", marketView),
@@ -2944,6 +3061,14 @@ function buildNoahTiles(summary) {
   const selectedMarketLabel = summary?.selected_market_label || noahMarketLabel(summary?.selected_market || "combined");
   const closedLiveFooter = selectedMarket === "combined" ? configuredMarkets : selectedMarketLabel || configuredMarkets;
   const pnlCurrency = String(pnl.currency || "EUR").toUpperCase() === "USD" ? "USD" : "EUR";
+  const isWhatIfPnl = pnl.kind === "what_if";
+  const whatIfPnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
+  const whatIfComparisonLine = value => `NORM ${whatIfPnlLine(value)}`;
+  const whatIfPnlStatus = value => {
+    if (viewStatus === "error") return "error";
+    if (!Number.isFinite(Number(value))) return "warn";
+    return pnlStatus(value, degraded, hasActiveMarket);
+  };
   const viewStatus = ["idle", "ok", "warn", "error"].includes(summary?.view_status) ? summary.view_status : null;
 
   const tiles = {
@@ -2959,28 +3084,28 @@ function buildNoahTiles(summary) {
     weekly_pnl: {
       key: "weekly_pnl",
       label: "Wochen PnL",
-      status: pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
-      line1: formatSignedEuro(pnl.weekly_eur, pnlCurrency),
-      line2: formatSignedPercent(pnl.weekly_pct),
-      footer: "Woche",
+      status: isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
+      line1: isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
+      line2: isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : formatSignedPercent(pnl.weekly_pct),
+      footer: isWhatIfPnl ? "WHAT-IF" : "Woche",
       updatedAt
     },
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
-      line1: formatSignedEuro(pnl.daily_eur, pnlCurrency),
-      line2: formatSignedPercent(pnl.daily_pct),
-      footer: nonTradingDay ? "Tag" : "24h",
+      status: isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
+      line1: isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
+      line2: isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : formatSignedPercent(pnl.daily_pct),
+      footer: isWhatIfPnl ? "WHAT-IF" : nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
     trades_today: {
       key: "trades_today",
       label: "Trades Heute",
-      status: nonTradingDay ? "idle" : degraded ? "warn" : "ok",
-      line1: nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
-      line2: nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
-      footer: "Heute",
+      status: isWhatIfPnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
+      line1: isWhatIfPnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isWhatIfPnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      footer: isWhatIfPnl ? "WHAT-IF" : "Heute",
       updatedAt
     },
     live_markets: {
@@ -3002,6 +3127,7 @@ function buildNoahTiles(summary) {
 
 export {
   buildMlbEloV2Summary,
+  buildMambaWhatIfSummary,
   buildNoahSummary,
   buildNoahSummaryFromObserverLive,
   buildNoahSummaryFromStreamdeckTiles,

@@ -5,7 +5,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-test("HTTP market selector persists and cycles only through the three requested views", async () => {
+test("HTTP market selector persists and cycles through default, both Mamba challengers, MLB and weather", async () => {
   const port = 47831;
   const baseUrl = `http://127.0.0.1:${port}`;
   const dataDir = await mkdtemp(path.join(tmpdir(), "streamdeck-view-test-"));
@@ -34,14 +34,14 @@ test("HTTP market selector persists and cycles only through the three requested 
 
     assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "us");
     const seen = [];
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       const response = await fetch(`${baseUrl}/noah/market/next`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
       assert.equal(response.status, 200);
       const payload = await response.json();
       seen.push(payload.market);
-      assert.deepEqual(payload.order, ["us", "mlb_elo_v2", "weather_public"]);
+      assert.deepEqual(payload.order, ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public"]);
     }
-    assert.deepEqual(seen, ["mlb_elo_v2", "weather_public", "us"]);
+    assert.deepEqual(seen, ["mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public", "us"]);
 
     const selected = await fetch(`${baseUrl}/noah/market`, {
       method: "POST",

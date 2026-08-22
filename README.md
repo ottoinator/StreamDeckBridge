@@ -295,9 +295,13 @@ Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Compan
 - `Noah Trades Today`: zeigt offene und geschlossene Trades des aktuellen Trade-Days
 - `Noah Live Markets`: zeigt die ausgewaehlte View und deren Runtime-Zustand
 
-Ein Druck auf `Noah Live Markets` schaltet alle fuenf Noah-Kacheln read-only durch diese Ansichten: `US Runtime (Default Lane) -> MLB Elo v2 -> Weather Public -> US Runtime`. Die Auswahl wird lokal in `noah-view.json` gespeichert; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade. Alte gespeicherte Ansichten wie Crypto, Prediction oder Combined werden beim Lesen sicher auf US Runtime migriert.
+Ein Druck auf `Noah Live Markets` schaltet alle fuenf Noah-Kacheln read-only durch diese Ansichten: `US Default ORB13 -> Mamba Transfer 52→95 -> Mamba Native95 -> MLB Elo v2 -> Weather Public -> US Default ORB13`. Die Auswahl wird lokal in `noah-view.json` gespeichert; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade. Alte gespeicherte Ansichten wie Crypto, Prediction oder Combined werden beim Lesen sicher auf US Runtime migriert.
 
-US Runtime kommt aus Noahs oeffentlichem Companion-StreamDeck-Vertrag. MLB Elo v2 liest ausschliesslich die lokalen paper-only Continuity-, Capture- und Ledger-Projektionen. Weather Public liest die Docker-Cadence, das separate paper-only Weather-Evidence-Ledger und den AWC/NWS-Monitorstatus. Fehlende, veraltete oder authority-unsichere Projektionen werden sichtbar blockiert; es gibt keinen Rueckfall auf andere Maerkte oder aggregierte PnL.
+US Default ORB13 und beide Mamba-Varianten kommen ausschliesslich aus dem oeffentlichen, read-only Endpoint `/api/v1/view/observer-card`. Die Mamba-Views akzeptieren nur `pnl_kind: "what_if"` und zeigen Tages- und Wochenwerte als `WHAT-IF`; die zweite Zeile zeigt die execution-normalisierte Vergleichs-PnL als `NORM`. Fehlende Roh- oder Vergleichswerte bleiben `n/a`, niemals `0,00 EUR`. Die Bridge liest weder Service-Units noch Runtime-Umgebungen und beschafft keine Tokens per SSH.
+
+Der additive Observer-Card-Vertrag lautet `mamba_challengers.transfer52_to_95` und `mamba_challengers.native95`. Jede Lane liefert mindestens `label`, `model_variant`, `status`, `pnl_kind: "what_if"`, `raw.day/week/cumulative`, `normalized.day/week/cumulative` (jeweils `pnl_eur`, `trade_count`, `available`, optional `reason`) sowie `comparison_status` und optional `reason`.
+
+MLB Elo v2 liest ausschliesslich die lokalen paper-only Continuity-, Capture- und Ledger-Projektionen. Weather Public liest die Docker-Cadence, das separate paper-only Weather-Evidence-Ledger und den AWC/NWS-Monitorstatus. Fehlende, veraltete oder authority-unsichere Projektionen werden sichtbar blockiert; es gibt keinen Rueckfall auf andere Maerkte oder aggregierte PnL.
 
 Die Wochen-PnL-Kachel behandelt `weekly_pnl_eur: 0` als autoritativen aktuellen Wochenwert. Sie darf nicht auf `realized_pnl_eur_total` zurueckfallen, weil dieser Wert markt- oder ledgeruebergreifend alte realisierte PnL enthalten kann.
 

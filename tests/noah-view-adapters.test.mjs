@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 import {
   buildMlbEloV2Summary,
+  buildMambaWhatIfSummary,
   buildNoahTiles,
   buildWeatherPublicSummary,
   normalizeNoahViewMarket
@@ -12,14 +13,98 @@ import {
 const NOW = Date.parse("2026-08-09T18:30:00Z");
 const authority = { paper_only: true, live_trading_authority: false, order_authority: "none" };
 
-test("view aliases migrate legacy selections to the three requested views", () => {
+test("view aliases migrate legacy selections and expose both Mamba challengers", () => {
   assert.deepEqual(
     ["us", "us_runtime", "default_lane", "combined", "crypto", "prediction_markets"].map(normalizeNoahViewMarket),
     ["us", "us", "us", "us", "us", "us"]
   );
   assert.equal(normalizeNoahViewMarket("mlb_elo_v2"), "mlb_elo_v2");
   assert.equal(normalizeNoahViewMarket("weather"), "weather_public");
+  assert.equal(normalizeNoahViewMarket("mamba_transfer"), "mamba_transfer_52_95");
+  assert.equal(normalizeNoahViewMarket("native95"), "mamba_native95");
   assert.throws(() => normalizeNoahViewMarket("eu"));
+});
+
+test("Mamba transfer tile view keeps raw and normalized PnL visibly what-if", () => {
+  const summary = buildMambaWhatIfSummary({
+    generated_at_utc: "2026-08-21T20:00:00Z",
+    mamba_challengers: {
+      transfer52_to_95: {
+        label: "Mamba Transfer 52→95",
+        model_variant: "fixed52_transfer_to_95",
+        status: "finalized",
+        pnl_kind: "what_if",
+        comparison_status: "comparable",
+        raw: {
+          day: { available: true, pnl_eur: 303.16, trade_count: 1 },
+          week: { available: true, pnl_eur: 892.597, trade_count: 3 },
+          cumulative: { available: true, pnl_eur: 1043.3, trade_count: 4 }
+        },
+        normalized: {
+          day: { available: true, pnl_eur: 12.34, trade_count: 1 },
+          week: { available: true, pnl_eur: 45.67, trade_count: 3 },
+          cumulative: { available: true, pnl_eur: 50.12, trade_count: 4 }
+        }
+      }
+    }
+  }, "mamba_transfer_52_95");
+  const tiles = buildNoahTiles(summary);
+  assert.equal(summary.selected_market, "mamba_transfer_52_95");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "+303,16 EUR");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line2, "NORM +12,34 EUR");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").footer, "WHAT-IF");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").footer, "WHAT-IF");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Open n/a");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close 1");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line1, "MAMBA 52>95");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "WHAT-IF");
+});
+
+test("Mamba Native95 fails closed to n/a instead of inventing zero PnL", () => {
+  const summary = buildMambaWhatIfSummary({
+    mamba_challengers: {
+      native95: {
+        label: "Mamba Native95",
+        model_variant: "native95",
+        status: "collecting",
+        pnl_kind: "what_if",
+        comparison_status: "unavailable",
+        reason: "normalization_pending",
+        raw: {
+          day: { available: false, reason: "day_not_finalized" },
+          week: { available: false, reason: "no_finalized_days" },
+          cumulative: { available: false, reason: "no_finalized_days" }
+        },
+        normalized: {
+          day: { available: false, reason: "comparator_pending" },
+          week: { available: false, reason: "comparator_pending" },
+          cumulative: { available: false, reason: "comparator_pending" }
+        }
+      }
+    }
+  }, "mamba_native95");
+  const tiles = buildNoahTiles(summary);
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line2, "NORM n/a");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close n/a");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "warn");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line1, "MAMBA N95");
+});
+
+test("Mamba observer parser rejects booked or unknown PnL kinds", () => {
+  const summary = buildMambaWhatIfSummary({
+    mamba_challengers: {
+      native95: { pnl_kind: "booked" }
+    }
+  }, "mamba_native95");
+  assert.match(summary.error, /PnL-Kind blockiert/);
+});
+
+test("bridge no longer reads a Companion token from SSH or systemd", async () => {
+  const bridgeSource = await readFile(new URL("../bridge/monitor-bridge.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(bridgeSource, /systemctl['"],\s*['"]cat/);
+  assert.doesNotMatch(bridgeSource, /NOAH_COMPANION_API_TOKEN/);
 });
 
 test("MLB Elo v2 feeds all five legacy Noah tiles without changing their keys", () => {
