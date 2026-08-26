@@ -181,7 +181,7 @@
       "Name": "Noah Live Markets",
       "UUID": "com.codex.stream-monitor.noah.live-markets",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Cycles read-only through Default ORB13, both Mamba what-if challengers, MLB, and Weather.",
+      "Tooltip": "Cycles read-only through Default ORB13, both Mamba what-if challengers, MLB Elo V2, and MLB Teamform.",
       "Controllers": [
         "Keypad"
       ],

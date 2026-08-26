@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-test("HTTP market selector persists and cycles through default, both Mamba challengers, MLB and weather", async () => {
+test("HTTP market selector cycles through both MLB lanes and rejects removed views", async () => {
   const port = 47831;
   const baseUrl = `http://127.0.0.1:${port}`;
   const dataDir = await mkdtemp(path.join(tmpdir(), "streamdeck-view-test-"));
+  await writeFile(path.join(dataDir, "noah-view.json"), `${JSON.stringify({ market: "weather_public", updatedAt: "2026-08-01T00:00:00Z" })}\n`);
   const child = spawn(process.execPath, ["bridge/monitor-bridge.mjs", "serve"], {
     cwd: new URL("..", import.meta.url),
     env: {
@@ -39,25 +40,27 @@ test("HTTP market selector persists and cycles through default, both Mamba chall
       assert.equal(response.status, 200);
       const payload = await response.json();
       seen.push(payload.market);
-      assert.deepEqual(payload.order, ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public"]);
+      assert.deepEqual(payload.order, ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3"]);
     }
-    assert.deepEqual(seen, ["mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public", "us"]);
+    assert.deepEqual(seen, ["mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3", "us"]);
 
     const selected = await fetch(`${baseUrl}/noah/market`, {
       method: "POST",
-      body: JSON.stringify({ market: "weather_public" }),
+      body: JSON.stringify({ market: "mlb_team_form_v3" }),
       headers: { "Content-Type": "application/json" }
     });
     assert.equal(selected.status, 200);
-    assert.equal((await selected.json()).market, "weather_public");
+    assert.equal((await selected.json()).market, "mlb_team_form_v3");
 
-    const rejected = await fetch(`${baseUrl}/noah/market`, {
-      method: "POST",
-      body: JSON.stringify({ market: "eu" }),
-      headers: { "Content-Type": "application/json" }
-    });
-    assert.equal(rejected.status, 400);
-    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "weather_public");
+    for (const market of ["weather_public", "btc", "crypto", "eu"]) {
+      const rejected = await fetch(`${baseUrl}/noah/market`, {
+        method: "POST",
+        body: JSON.stringify({ market }),
+        headers: { "Content-Type": "application/json" }
+      });
+      assert.equal(rejected.status, 400, market);
+    }
+    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "mlb_team_form_v3");
   } finally {
     child.kill("SIGTERM");
   }

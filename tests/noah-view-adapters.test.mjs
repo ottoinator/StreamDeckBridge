@@ -4,9 +4,9 @@ import { readFile } from "node:fs/promises";
 
 import {
   buildMlbEloV2Summary,
+  buildMlbTeamFormV3Summary,
   buildMambaWhatIfSummary,
   buildNoahTiles,
-  buildWeatherPublicSummary,
   normalizeNoahViewMarket
 } from "../bridge/monitor-bridge.mjs";
 
@@ -19,7 +19,9 @@ test("view aliases migrate legacy selections and expose both Mamba challengers",
     ["us", "us", "us", "us", "us", "us"]
   );
   assert.equal(normalizeNoahViewMarket("mlb_elo_v2"), "mlb_elo_v2");
-  assert.equal(normalizeNoahViewMarket("weather"), "weather_public");
+  assert.equal(normalizeNoahViewMarket("weather"), "us");
+  assert.equal(normalizeNoahViewMarket("btc"), "us");
+  assert.equal(normalizeNoahViewMarket("teamform"), "mlb_team_form_v3");
   assert.equal(normalizeNoahViewMarket("mamba_transfer"), "mamba_transfer_52_95");
   assert.equal(normalizeNoahViewMarket("native95"), "mamba_native95");
   assert.throws(() => normalizeNoahViewMarket("eu"));
@@ -121,73 +123,61 @@ test("MLB Elo v2 feeds all five legacy Noah tiles without changing their keys", 
   assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "RUNNING");
 });
 
-test("Weather public keeps metrics visible but reports a blocked public monitor", () => {
-  const summary = buildWeatherPublicSummary({
-    monitor: { paper_only: true, observed_at_utc: "2026-08-09T18:03:00Z", status: "blocked", reason: "command_failed:docker:image" },
-    cadence: { ...authority, wallet_authority: "none", scheduler_authority: "none", status: "cycle_running", last_cycle_completed_at_utc: "2026-08-09T18:29:00Z", next_capture_not_before_utc: "2026-08-09T18:31:00Z" },
-    evidence: { ...authority, wallet_authority: "none", observed_at_utc: "2026-08-09T18:29:10Z", open_position_count: 4, settled_position_count: 0, realized_terminal_pnl_usd: "0.00" }
+test("MLB Teamform v3 feeds the existing tiles from its own paper-only status", () => {
+  const summary = buildMlbTeamFormV3Summary({
+    record_type: "mlb_nextgen_team_form_paper_status_v2",
+    observed_at_utc: "2026-08-09T18:29:45Z",
+    paper_only: true,
+    shadow_only: true,
+    live_trading_authority: false,
+    order_authority: "none",
+    wallet_authority: "none",
+    promotion_authority: "none",
+    official_booked_pnl_cents: 0,
+    ledger_integrity: "pass",
+    team_form_cache: { status: "healthy" },
+    settlement_freshness: { status: "healthy", open_final_eligible_count: 2 },
+    settlement_count: 7,
+    settled_paper_pnl_cents: -3356
   }, NOW);
   const tiles = buildNoahTiles(summary);
-  assert.equal(tiles.length, 5);
-  assert.equal(tiles.find(tile => tile.key === "live_markets").status, "error");
-  assert.equal(tiles.find(tile => tile.key === "live_markets").line1, "WEATHER");
-  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "BLOCKED");
-  assert.notEqual(tiles.find(tile => tile.key === "cycle").status, "ok");
-  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "0,00 USD");
-  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Open 4");
+  assert.deepEqual(tiles.map(tile => tile.key), ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"]);
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line1, "MLB FORM");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "PAPER");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").label, "Paper PnL");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").line1, "-33,56 EUR");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").line2, "7 SETTLED");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line2, "KEIN FENSTER");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").label, "Paper Trades");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "KEIN FENSTER");
 });
 
-test("Weather public reports the permanent Exact-8 daemon without legacy artifacts", () => {
-  const summary = buildWeatherPublicSummary({
-    monitor: {
-      kind: "paper_exact8_daemon_status_v1",
-      paper_only: true,
-      heartbeat_at_utc: "2026-08-09T18:29:45Z",
-      phase: "waiting",
-      ready: true,
-      running: true,
-      degraded: false,
-      aggregate_paper_settled: 3,
-      open_paper_positions: 2,
-      net_pnl_cents: 37,
-      next_action_at_utc: "2026-08-10T14:30:00Z",
-      authorities: { order: "none", wallet: "none", promotion: "none", scheduler: "paper_daily_only" }
-    },
-    cadence: null,
-    evidence: null
-  }, NOW);
-  const tiles = buildNoahTiles(summary);
-  assert.equal(summary.view_status, "ok");
-  assert.equal(summary.view_status_label, "WAITING");
-  assert.equal(summary.cycle.next_cycle_at, "2026-08-10T14:30:00Z");
-  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Open 2");
-  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Close 3");
-  assert.equal(summary.pnl.daily_eur, 0.37);
-  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "WAITING");
-});
-
-test("Weather public defaults to the isolated Edge v2 controller status", async () => {
-  const bridgeSource = await readFile(new URL("../bridge/monitor-bridge.mjs", import.meta.url), "utf8");
-  assert.match(bridgeSource, /NoahData\/paper-edge-v2\/control\/control\/status\.json/);
-  assert.doesNotMatch(bridgeSource, /NoahData\/paper-lane-daemon\/control\/control\/status\.json/);
-});
-
-test("Weather public rejects authority drift in the Exact-8 daemon", () => {
-  const summary = buildWeatherPublicSummary({
-    monitor: {
-      kind: "paper_exact8_daemon_status_v1",
-      paper_only: true,
-      heartbeat_at_utc: "2026-08-09T18:29:45Z",
-      phase: "waiting",
-      ready: true,
-      running: true,
-      degraded: false,
-      authorities: { order: "none", wallet: "none", promotion: "none", scheduler: "unbounded" }
-    },
-    cadence: null,
-    evidence: null
-  }, NOW);
-  assert.equal(summary.error, "Weather Public Authority blockiert");
+test("MLB Teamform v3 fails closed for stale or authority-unsafe status", () => {
+  const base = {
+    record_type: "mlb_nextgen_team_form_paper_status_v2",
+    observed_at_utc: "2026-08-09T18:00:00Z",
+    paper_only: true,
+    shadow_only: true,
+    live_trading_authority: false,
+    order_authority: "none",
+    wallet_authority: "none",
+    promotion_authority: "none",
+    official_booked_pnl_cents: 0,
+    ledger_integrity: "pass",
+    team_form_cache: { status: "healthy" },
+    settlement_freshness: { status: "healthy" }
+  };
+  const stale = buildMlbTeamFormV3Summary(base, NOW);
+  assert.equal(stale.view_status, "warn");
+  assert.equal(stale.view_status_label, "STALE");
+  assert.match(stale.warnings.freshness, /veraltet/);
+  const badLedger = buildMlbTeamFormV3Summary({ ...base, observed_at_utc: "2026-08-09T18:29:45Z", ledger_integrity: "failed" }, NOW);
+  assert.equal(badLedger.view_status, "warn");
+  assert.match(badLedger.warnings.ledger, /Ledger blockiert/);
+  assert.equal(buildMlbTeamFormV3Summary({ ...base, observed_at_utc: "2026-08-09T18:29:45Z", order_authority: "paper" }, NOW).error, "MLB Teamform Authority blockiert");
+  assert.match(buildMlbTeamFormV3Summary(null, NOW).error, /Status fehlt/);
 });
 
 test("plugin contract still contains and registers all eleven original actions", async () => {
@@ -229,12 +219,6 @@ test("plugin contract still contains and registers all eleven original actions",
     assert.match(pluginSource, new RegExp(`import \\{ ${className} \\}`));
     assert.match(pluginSource, new RegExp(`registerAction\\(new ${className}\\(\\)\\)`));
   }
-  const publicViewText = JSON.stringify(buildNoahTiles(buildWeatherPublicSummary({
-    monitor: { paper_only: true, observed_at_utc: "2026-08-09T18:03:00Z", status: "blocked" },
-    cadence: { ...authority, wallet_authority: "none", scheduler_authority: "none", status: "cycle_running", last_cycle_completed_at_utc: "2026-08-09T18:29:00Z" },
-    evidence: { ...authority, wallet_authority: "none", observed_at_utc: "2026-08-09T18:29:10Z", open_position_count: 0, settled_position_count: 0 }
-  }, NOW))).toLowerCase();
-  for (const forbidden of ["crypto", "prediction", "combined", "xetra", "japan"]) {
-    assert.equal(publicViewText.includes(forbidden), false, forbidden);
-  }
+  const bridgeSource = await readFile(new URL("../bridge/monitor-bridge.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(bridgeSource, /WEATHER_PUBLIC_|buildWeatherPublicSummary/);
 });

@@ -39,7 +39,7 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
-const NOAH_VIEW_MARKET_ORDER = ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "weather_public"];
+const NOAH_VIEW_MARKET_ORDER = ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3"];
 const MAMBA_VIEW_METADATA = {
   mamba_transfer_52_95: {
     label: "MAMBA 52>95",
@@ -55,16 +55,10 @@ const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCA
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
 const MLB_ELO_V2_ROOT = process.env.CODEX_MONITOR_MLB_ELO_V2_ROOT || path.resolve(
   process.cwd(),
-  "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v1"
+  "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v2"
 );
-const WEATHER_PUBLIC_ARTIFACTS_ROOT = process.env.CODEX_MONITOR_WEATHER_PUBLIC_ARTIFACTS_ROOT || path.join(
-  os.homedir(),
-  "NoahData/prediction_markets_weather/artifacts"
-);
-const WEATHER_PUBLIC_STATUS_PATH = process.env.CODEX_MONITOR_WEATHER_PUBLIC_STATUS_PATH || path.join(
-  os.homedir(),
-  "NoahData/paper-edge-v2/control/control/status.json"
-);
+const MLB_TEAM_FORM_V3_ROOT = String(process.env.CODEX_MONITOR_MLB_TEAM_FORM_V3_ROOT || "").trim();
+const MLB_TEAM_FORM_V3_CONTAINER = String(process.env.CODEX_MONITOR_MLB_TEAM_FORM_V3_CONTAINER || "wm-vorhersager-mlb-nextgen-team-form-paper").trim();
 const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
 const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
 const stateStreamClients = new Set();
@@ -450,11 +444,14 @@ function normalizeNoahViewMarket(value) {
   if (["mamba_native", "mamba_native95", "native95", "mamba95"].includes(raw)) {
     return "mamba_native95";
   }
-  if (["mlb", "mlb_elo", "mlb_elo_v2"].includes(raw)) {
+  if (["mlb", "mlb_elo", "mlb_elo_v2", "challenger", "challenger_engine"].includes(raw)) {
     return "mlb_elo_v2";
   }
-  if (["weather", "weather_lane", "weather_public"].includes(raw)) {
-    return "weather_public";
+  if (["mlb_team_form", "mlb_teamform", "mlb_team_form_v3", "team_form", "teamform"].includes(raw)) {
+    return "mlb_team_form_v3";
+  }
+  if (["weather", "weather_lane", "weather_public", "btc", "bitcoin"].includes(raw)) {
+    return "us";
   }
   if (!NOAH_VIEW_MARKET_ORDER.includes(raw)) {
     throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
@@ -1961,7 +1958,7 @@ function isNoahNonTradingDay(summary, now = new Date()) {
   if (summary?.error) {
     return false;
   }
-  if (["mlb_elo_v2", "weather_public"].includes(summary?.selected_market)) {
+  if (["mlb_elo_v2", "mlb_team_form_v3"].includes(summary?.selected_market)) {
     return false;
   }
   const live = summary?.live || {};
@@ -2210,8 +2207,8 @@ function noahMarketLabel(value) {
   if (market === "mlb_elo_v2") {
     return "MLB V2";
   }
-  if (market === "weather_public") {
-    return "WEATHER";
+  if (market === "mlb_team_form_v3") {
+    return "MLB FORM";
   }
   if (market === "combined") {
     return "COMB";
@@ -2239,11 +2236,8 @@ function noahProductLabel(value) {
   if (market === "mamba_transfer_52_95" || market === "mamba_native95") {
     return "WHAT-IF";
   }
-  if (market === "mlb_elo_v2") {
+  if (market === "mlb_elo_v2" || market === "mlb_team_form_v3") {
     return "SPORT";
-  }
-  if (market === "weather_public") {
-    return "PUBLIC";
   }
   if (market === "index_futures") {
     return "FUT";
@@ -2643,94 +2637,78 @@ function buildMlbEloV2Summary({ continuity, capture, paper }, now = Date.now()) 
   };
 }
 
-function buildWeatherPublicSummary({ monitor, cadence, evidence }, now = Date.now()) {
-  if (monitor?.kind === "paper_exact8_daemon_status_v1") {
-    const authorities = monitor.authorities || {};
-    if (monitor.paper_only !== true || authorities.order !== "none" || authorities.wallet !== "none" ||
-        authorities.promotion !== "none" || authorities.scheduler !== "paper_daily_only") {
-      return makeNoahProbeFallback("Weather Public Authority blockiert");
-    }
-    const observedAt = monitor.heartbeat_at_utc || monitor.last_transition_at_utc;
-    const fresh = projectionAgeMs(observedAt, now) <= 3 * 60_000;
-    const phase = String(monitor.phase || "missing").toLowerCase();
-    const blocked = phase === "paused_requires_review" || monitor.ready !== true || monitor.running !== true;
-    const healthy = fresh && !blocked && monitor.degraded !== true;
-    const settled = Math.max(0, Number(monitor.aggregate_paper_settled || 0));
-    const openPositions = Math.max(0, Number(monitor.open_paper_positions || 0));
-    const netPnlCents = Number(monitor.net_pnl_cents);
-    const windowPnl = settled === 0 ? 0 : Number.isFinite(netPnlCents) ? netPnlCents / 100 : Number.NaN;
-    const warnings = {};
-    if (!fresh) warnings.freshness = "Weather Paper Lane Status ist veraltet";
-    if (blocked) warnings.runtime = String(monitor.last_error || "Weather Paper Lane blockiert");
-    if (monitor.degraded === true) warnings.runtime = String(monitor.last_error || "Weather Paper Lane braucht Aufmerksamkeit");
-    return {
-      checked_at: observedAt || nowIso(),
-      selected_market: "weather_public",
-      selected_market_label: noahMarketLabel("weather_public"),
-      market_closed: false,
-      cycle: {
-        market_label: "WEATHER",
-        mode_label: blocked ? "Blocked" : monitor.degraded === true ? "Attention" : phase === "waiting" ? "Waiting" : "Running",
-        next_cycle_at: monitor.next_action_at_utc || null,
-        trading: healthy
-      },
-      pnl: { daily_eur: windowPnl, daily_pct: Number.NaN, weekly_eur: windowPnl, weekly_pct: Number.NaN, currency: "USD" },
-      trades_today: { open: openPositions, closed: settled },
-      live: {
-        configured_markets: ["WEATHER"],
-        configured_products: ["PUBLIC"],
-        trading_markets: healthy ? ["WEATHER"] : [],
-        trading_products: healthy ? ["PUBLIC"] : []
-      },
-      warnings,
-      view_status: blocked ? "error" : healthy ? "ok" : "warn",
-      view_status_label: blocked ? "BLOCKED" : healthy ? (phase === "waiting" ? "WAITING" : "RUNNING") : fresh ? "ATTENTION" : "STALE"
-    };
+function buildMlbTeamFormV3Summary(status, now = Date.now()) {
+  if (!status || status.record_type !== "mlb_nextgen_team_form_paper_status_v2") {
+    return makeNoahProbeFallback("MLB Teamform Status fehlt");
   }
-  if (!monitor || !cadence || !evidence) {
-    return makeNoahProbeFallback("Weather Public Status fehlt");
+  const authoritySafe = status.paper_only === true && status.shadow_only === true &&
+    status.live_trading_authority === false && status.order_authority === "none" &&
+    status.wallet_authority === "none" && status.promotion_authority === "none";
+  if (!authoritySafe || status.official_booked_pnl_cents !== 0) {
+    return makeNoahProbeFallback("MLB Teamform Authority blockiert");
   }
-  if (!authorityIsPaperOnly(cadence, evidence) || monitor.paper_only !== true ||
-      cadence.wallet_authority !== "none" || cadence.scheduler_authority !== "none" || evidence.wallet_authority !== "none") {
-    return makeNoahProbeFallback("Weather Public Authority blockiert");
-  }
-  const observedAt = evidence.observed_at_utc || cadence.last_cycle_completed_at_utc || monitor.observed_at_utc;
-  const evidenceFresh = projectionAgeMs(observedAt, now) <= 10 * 60_000;
-  const monitorFresh = projectionAgeMs(monitor.observed_at_utc, now) <= 90 * 60_000;
-  const monitorState = String(monitor.status || "missing").toLowerCase();
-  const blocked = ["blocked", "error", "failed"].includes(monitorState);
-  const cadenceActive = ["cycle_running", "running", "ok", "healthy"].includes(String(cadence.status || "").toLowerCase());
-  const settled = Math.max(0, Number(evidence.settled_position_count || 0));
-  const realizedUsd = Number(evidence.realized_terminal_pnl_usd);
-  const windowPnl = settled === 0 ? 0 : Number.isFinite(realizedUsd) && evidence.pnl_window === "current_week" ? realizedUsd : Number.NaN;
+
+  const observedAt = status.observed_at_utc;
+  const fresh = projectionAgeMs(observedAt, now) <= 10 * 60_000;
+  const ledgerHealthy = status.ledger_integrity === "pass";
+  const cacheHealthy = status.team_form_cache?.status === "healthy";
+  const settlementHealthy = status.settlement_freshness?.status === "healthy";
+  const healthy = fresh && ledgerHealthy && cacheHealthy && settlementHealthy;
+  const settled = Math.max(0, Number(status.settlement_count || 0));
+  const pnlCents = Number(status.settled_paper_pnl_cents);
+  const cumulativePnl = Number.isFinite(pnlCents) ? pnlCents / 100 : Number.NaN;
   const warnings = {};
-  if (!evidenceFresh || !monitorFresh) warnings.freshness = "Weather Public Status ist veraltet";
-  if (blocked) warnings.monitor = String(monitor.reason || "Weather Public Monitor blockiert");
-  if (settled > 0 && !Number.isFinite(windowPnl)) warnings.pnl_window = "Weather Tages-/Wochenfenster fehlt";
-  const active = cadenceActive && evidenceFresh && monitorFresh && !blocked;
+  if (!fresh) warnings.freshness = "MLB Teamform Status ist veraltet";
+  if (!ledgerHealthy) warnings.ledger = "MLB Teamform Ledger blockiert";
+  if (!cacheHealthy) warnings.cache = "MLB Teamform Cache blockiert";
+  if (!settlementHealthy) warnings.settlement = "MLB Teamform Settlement blockiert";
+  if (!Number.isFinite(cumulativePnl)) warnings.pnl = "MLB Teamform Paper-PnL fehlt";
+
   return {
     checked_at: observedAt || nowIso(),
-    selected_market: "weather_public",
-    selected_market_label: noahMarketLabel("weather_public"),
+    selected_market: "mlb_team_form_v3",
+    selected_market_label: noahMarketLabel("mlb_team_form_v3"),
     market_closed: false,
     cycle: {
-      market_label: "WEATHER",
-      mode_label: active ? "Running" : blocked ? "Blocked" : "Attention",
-      next_cycle_at: cadence.next_capture_not_before_utc || null,
-      trading: active
+      market_label: "MLB FORM",
+      mode_label: healthy ? "Running" : "Attention",
+      next_cycle_at: null,
+      trading: healthy
     },
-    pnl: { daily_eur: windowPnl, daily_pct: Number.NaN, weekly_eur: windowPnl, weekly_pct: Number.NaN, currency: "USD" },
-    trades_today: { open: Number(evidence.open_position_count || 0), closed: settled },
+    pnl: {
+      daily_eur: Number.NaN,
+      daily_pct: Number.NaN,
+      weekly_eur: Number.NaN,
+      weekly_pct: Number.NaN,
+      cumulative_eur: cumulativePnl,
+      settlement_count: settled,
+      kind: "cumulative_paper",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: null },
     live: {
-      configured_markets: ["WEATHER"],
-      configured_products: ["PUBLIC"],
-      trading_markets: active ? ["WEATHER"] : [],
-      trading_products: active ? ["PUBLIC"] : []
+      configured_markets: ["MLB FORM"],
+      configured_products: ["PAPER"],
+      trading_markets: healthy ? ["MLB FORM"] : [],
+      trading_products: healthy ? ["PAPER"] : []
     },
     warnings,
-    view_status: blocked ? "error" : active ? "ok" : "warn",
-    view_status_label: blocked ? "BLOCKED" : active ? "RUNNING" : evidenceFresh ? "ATTENTION" : "STALE"
+    view_status: healthy ? "ok" : "warn",
+    view_status_label: healthy ? "PAPER" : fresh ? "ATTENTION" : "STALE"
   };
+}
+
+async function resolveMlbTeamFormV3Root() {
+  if (MLB_TEAM_FORM_V3_ROOT) {
+    return MLB_TEAM_FORM_V3_ROOT;
+  }
+  const template = '{{range .Mounts}}{{if eq .Destination "/lane"}}{{.Source}}{{end}}{{end}}';
+  const { stdout } = await execFileAsync("docker", ["inspect", "-f", template, MLB_TEAM_FORM_V3_CONTAINER], { timeout: 4_000 });
+  const root = String(stdout || "").trim();
+  if (!path.isAbsolute(root)) {
+    throw new Error("MLB Teamform Runtime-Root fehlt");
+  }
+  return root;
 }
 
 async function readJsonProjection(filePath) {
@@ -2852,16 +2830,10 @@ async function probeNoahMonitor(selectedMarket = "combined") {
     ]);
     return buildMlbEloV2Summary({ continuity, capture, paper });
   }
-  if (marketView === "weather_public") {
-    const monitor = await readJsonProjection(WEATHER_PUBLIC_STATUS_PATH).catch(() => null);
-    if (monitor?.kind === "paper_exact8_daemon_status_v1") {
-      return buildWeatherPublicSummary({ monitor, cadence: null, evidence: null });
-    }
-    const [cadence, evidence] = await Promise.all([
-      readJsonProjection(path.join(WEATHER_PUBLIC_ARTIFACTS_ROOT, "noah_pm_weather_primary_cadence.json")).catch(() => null),
-      readJsonProjection(path.join(WEATHER_PUBLIC_ARTIFACTS_ROOT, "noah_pm_weather_paper_evidence_ledger.json")).catch(() => null)
-    ]);
-    return buildWeatherPublicSummary({ monitor, cadence, evidence });
+  if (marketView === "mlb_team_form_v3") {
+    const root = await resolveMlbTeamFormV3Root().catch(() => null);
+    const status = root ? await readJsonProjection(path.join(root, "status.json")).catch(() => null) : null;
+    return buildMlbTeamFormV3Summary(status);
   }
   try {
     const baseUrl = getNoahMonitorBaseUrl();
@@ -3062,6 +3034,7 @@ function buildNoahTiles(summary) {
   const closedLiveFooter = selectedMarket === "combined" ? configuredMarkets : selectedMarketLabel || configuredMarkets;
   const pnlCurrency = String(pnl.currency || "EUR").toUpperCase() === "USD" ? "USD" : "EUR";
   const isWhatIfPnl = pnl.kind === "what_if";
+  const isCumulativePaperPnl = pnl.kind === "cumulative_paper";
   const whatIfPnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
   const whatIfComparisonLine = value => `NORM ${whatIfPnlLine(value)}`;
   const whatIfPnlStatus = value => {
@@ -3075,37 +3048,37 @@ function buildNoahTiles(summary) {
     cycle: {
       key: "cycle",
       label: "Noah Zyklus",
-      status: cycleStatus,
-      line1: cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
-      line2: blankTileLine(),
-      footer: cycleHasTimer ? "Naechste" : blankTileLine(),
+      status: isCumulativePaperPnl ? (viewStatus || "warn") : cycleStatus,
+      line1: isCumulativePaperPnl ? "PAPER" : cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
+      line2: isCumulativePaperPnl ? String(summary.view_status_label || "").slice(0, 18) : blankTileLine(),
+      footer: isCumulativePaperPnl ? "TEAMFORM" : cycleHasTimer ? "Naechste" : blankTileLine(),
       updatedAt
     },
     weekly_pnl: {
       key: "weekly_pnl",
-      label: "Wochen PnL",
-      status: isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
-      line1: isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
-      line2: isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : formatSignedPercent(pnl.weekly_pct),
-      footer: isWhatIfPnl ? "WHAT-IF" : "Woche",
+      label: isCumulativePaperPnl ? "Paper PnL" : "Wochen PnL",
+      status: isCumulativePaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : formatSignedPercent(pnl.weekly_pct),
+      footer: isCumulativePaperPnl ? "PAPER TOTAL" : isWhatIfPnl ? "WHAT-IF" : "Woche",
       updatedAt
     },
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
-      line1: isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
-      line2: isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : formatSignedPercent(pnl.daily_pct),
-      footer: isWhatIfPnl ? "WHAT-IF" : nonTradingDay ? "Tag" : "24h",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : formatSignedPercent(pnl.daily_pct),
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
     trades_today: {
       key: "trades_today",
-      label: "Trades Heute",
-      status: isWhatIfPnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
-      line1: isWhatIfPnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
-      line2: isWhatIfPnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
-      footer: isWhatIfPnl ? "WHAT-IF" : "Heute",
+      label: isCumulativePaperPnl ? "Paper Trades" : "Trades Heute",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : "Heute",
       updatedAt
     },
     live_markets: {
@@ -3127,12 +3100,12 @@ function buildNoahTiles(summary) {
 
 export {
   buildMlbEloV2Summary,
+  buildMlbTeamFormV3Summary,
   buildMambaWhatIfSummary,
   buildNoahSummary,
   buildNoahSummaryFromObserverLive,
   buildNoahSummaryFromStreamdeckTiles,
   buildNoahTiles,
-  buildWeatherPublicSummary,
   normalizeNoahViewMarket,
   portfolioWeekPnlEur,
   portfolioWeekPnlPct
@@ -3517,6 +3490,9 @@ async function serve() {
         let view;
         try {
           const body = await parseBody(req);
+          if (!NOAH_VIEW_MARKET_ORDER.includes(String(body.market || "").trim().toLowerCase())) {
+            throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
+          }
           view = await writeNoahMarketView(body.market);
         } catch (error) {
           sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
