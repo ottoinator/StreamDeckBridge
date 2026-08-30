@@ -5,11 +5,11 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-test("HTTP market selector cycles through both MLB lanes and rejects removed views", async () => {
+test("HTTP selector migrates legacy Native95 and cycles paper lanes separately from What-if", async () => {
   const port = 47831;
   const baseUrl = `http://127.0.0.1:${port}`;
   const dataDir = await mkdtemp(path.join(tmpdir(), "streamdeck-view-test-"));
-  await writeFile(path.join(dataDir, "noah-view.json"), `${JSON.stringify({ market: "weather_public", updatedAt: "2026-08-01T00:00:00Z" })}\n`);
+  await writeFile(path.join(dataDir, "noah-view.json"), `${JSON.stringify({ market: "mamba_native95", updatedAt: "2026-08-01T00:00:00Z" })}\n`);
   const child = spawn(process.execPath, ["bridge/monitor-bridge.mjs", "serve"], {
     cwd: new URL("..", import.meta.url),
     env: {
@@ -33,16 +33,16 @@ test("HTTP market selector cycles through both MLB lanes and rejects removed vie
     }
     assert.equal(ready, true);
 
-    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "us");
+    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "paper_primary");
     const seen = [];
     for (let index = 0; index < 5; index += 1) {
       const response = await fetch(`${baseUrl}/noah/market/next`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
       assert.equal(response.status, 200);
       const payload = await response.json();
       seen.push(payload.market);
-      assert.deepEqual(payload.order, ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3"]);
+      assert.deepEqual(payload.order, ["paper_primary", "paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3"]);
     }
-    assert.deepEqual(seen, ["mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3", "us"]);
+    assert.deepEqual(seen, ["paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3", "paper_primary"]);
 
     const selected = await fetch(`${baseUrl}/noah/market`, {
       method: "POST",

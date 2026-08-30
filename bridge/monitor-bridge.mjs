@@ -39,16 +39,16 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
-const NOAH_VIEW_MARKET_ORDER = ["us", "mamba_transfer_52_95", "mamba_native95", "mlb_elo_v2", "mlb_team_form_v3"];
+const NOAH_VIEW_MARKET_ORDER = ["paper_primary", "paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3"];
 const MAMBA_VIEW_METADATA = {
   mamba_transfer_52_95: {
     label: "MAMBA 52>95",
     laneId: "noah_us_mamba_exact6y_expanded95_whatif_v1"
-  },
-  mamba_native95: {
-    label: "MAMBA N95",
-    laneId: "noah_us_mamba_native95_exact6y_pragmatic_paper_final_fit_bundle_v2"
   }
+};
+const PAPER_LANE_VIEW_METADATA = {
+  paper_primary: { label: "NATIVE95 60M", role: "primary", roleLabel: "PRIMARY" },
+  paper_challenger: { label: "ORB13", role: "paper_challenger", roleLabel: "CHALLENGER" }
 };
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
@@ -427,7 +427,7 @@ async function ensureDataFile() {
   } catch {
     await writeFile(
       NOAH_VIEW_FILE,
-      `${JSON.stringify({ market: "us", updatedAt: nowIso() }, null, 2)}\n`,
+      `${JSON.stringify({ market: "paper_primary", updatedAt: nowIso() }, null, 2)}\n`,
       "utf8"
     );
   }
@@ -436,13 +436,16 @@ async function ensureDataFile() {
 function normalizeNoahViewMarket(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (["us", "us_runtime", "default", "default_lane", "combined", "all", "crypto", "prediction", "predictions", "prediction_market", "prediction_markets"].includes(raw)) {
-    return "us";
+    return "paper_primary";
   }
   if (["mamba_transfer", "mamba_transfer_52_95", "mamba_52_95", "mamba52", "transfer95"].includes(raw)) {
     return "mamba_transfer_52_95";
   }
-  if (["mamba_native", "mamba_native95", "native95", "mamba95"].includes(raw)) {
-    return "mamba_native95";
+  if (["paper_primary", "primary", "mamba_native", "mamba_native95", "native95", "mamba95"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (["paper_challenger", "orb13", "orb_13", "challenger_us"].includes(raw)) {
+    return "paper_challenger";
   }
   if (["mlb", "mlb_elo", "mlb_elo_v2", "challenger", "challenger_engine"].includes(raw)) {
     return "mlb_elo_v2";
@@ -451,7 +454,7 @@ function normalizeNoahViewMarket(value) {
     return "mlb_team_form_v3";
   }
   if (["weather", "weather_lane", "weather_public", "btc", "bitcoin"].includes(raw)) {
-    return "us";
+    return "paper_primary";
   }
   if (!NOAH_VIEW_MARKET_ORDER.includes(raw)) {
     throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
@@ -468,7 +471,7 @@ async function readNoahMarketView() {
       updatedAt: parsed?.updatedAt || new Date(0).toISOString()
     };
   } catch {
-    const fallback = { market: "us", updatedAt: nowIso() };
+    const fallback = { market: "paper_primary", updatedAt: nowIso() };
     await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(fallback, null, 2)}\n`, "utf8");
     return fallback;
   }
@@ -2201,8 +2204,8 @@ function noahMarketLabel(value) {
   if (market === "mamba_transfer_52_95") {
     return MAMBA_VIEW_METADATA.mamba_transfer_52_95.label;
   }
-  if (market === "mamba_native95") {
-    return MAMBA_VIEW_METADATA.mamba_native95.label;
+  if (PAPER_LANE_VIEW_METADATA[market]) {
+    return PAPER_LANE_VIEW_METADATA[market].label;
   }
   if (market === "mlb_elo_v2") {
     return "MLB V2";
@@ -2233,8 +2236,11 @@ function noahMarketLabel(value) {
 
 function noahProductLabel(value) {
   const market = normalizeNoahMarketKey(value);
-  if (market === "mamba_transfer_52_95" || market === "mamba_native95") {
+  if (market === "mamba_transfer_52_95") {
     return "WHAT-IF";
+  }
+  if (PAPER_LANE_VIEW_METADATA[market]) {
+    return "PAPER";
   }
   if (market === "mlb_elo_v2" || market === "mlb_team_form_v3") {
     return "SPORT";
@@ -2723,9 +2729,9 @@ function asUsRuntimeView(summary) {
   return {
     ...summary,
     selected_market: "us",
-    selected_market_label: "US ORB13",
+    selected_market_label: "US RUNTIME",
     view_status: running ? "ok" : "idle",
-    view_status_label: "DEFAULT ORB13"
+    view_status_label: "PAPER RUNTIME"
   };
 }
 
@@ -2750,7 +2756,7 @@ function mambaTradeCount(window) {
 }
 
 function buildMambaWhatIfSummary(observerCard, marketView) {
-  const laneKey = marketView === "mamba_transfer_52_95" ? "transfer52_to_95" : "native95";
+  const laneKey = "transfer52_to_95";
   const lane = observerCard?.mamba_challengers?.[laneKey];
   const metadata = MAMBA_VIEW_METADATA[marketView];
   if (!lane || typeof lane !== "object") {
@@ -2820,6 +2826,136 @@ function buildMambaWhatIfSummary(observerCard, marketView) {
   };
 }
 
+function paperLaneWindow(lane, name) {
+  const windows = lane?.windows && typeof lane.windows === "object" ? lane.windows : {};
+  if (name === "day" && lane?.current_day && typeof lane.current_day === "object") {
+    return lane.current_day;
+  }
+  return windows[name] && typeof windows[name] === "object" ? windows[name] : {};
+}
+
+function paperLanePnl(window, fallback) {
+  if (window?.available === false) return Number.NaN;
+  const value = window?.pnl_eur ?? window?.booked_pnl_eur ?? fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function paperLaneTradeCount(window, lane) {
+  if (window?.available === false) return null;
+  const parsed = Number(window?.trade_count ?? lane?.trade_count ?? lane?.closed_trade_count);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function buildPaperLaneSummary(observerCard, marketView) {
+  const metadata = PAPER_LANE_VIEW_METADATA[marketView];
+  const promotionContract = observerCard?.lane_promotion_evidence
+    || (Array.isArray(observerCard?.promotion_evidence?.lanes) ? observerCard.promotion_evidence : null);
+  const promotionLanes = Array.isArray(promotionContract?.lanes) ? promotionContract.lanes : [];
+  const promotionLane = promotionLanes.find(item => item && typeof item === "object" && (item.role || item.current_role) === metadata?.role);
+  const contract = observerCard?.paper_lane_contract;
+  const lanes = Array.isArray(observerCard?.paper_lanes)
+    ? observerCard.paper_lanes
+    : Array.isArray(observerCard?.lanes?.paper_lanes) ? observerCard.lanes.paper_lanes : [];
+  const promotionContractSafe = promotionContract?.contract_version === "noah.us.lane-promotion-evidence.v2"
+    && promotionContract.available === true
+    && promotionContract.state === "available"
+    && promotionContract.paper_only === true
+    && promotionContract.target_valid_sessions === 40
+    && promotionContract.fallback_used === false;
+  const paperContractSafe = contract?.contract_version === "noah.us.ibkr-paper-lanes.v2"
+    && contract.independent_books === true
+    && contract.combined_pnl_claim === false;
+  if (!metadata || (!promotionContractSafe && !paperContractSafe)) {
+    return makeNoahProbeFallback(`${metadata?.label || "Paper-Lane"} Contract fehlt`);
+  }
+  const legacyLane = lanes.find(item => item && typeof item === "object" && (item.role || item.current_role) === metadata.role);
+  const lane = promotionContractSafe ? (promotionLane ? {
+    ...promotionLane,
+    role: promotionLane.current_role,
+    state: promotionLane.current_day?.state,
+    booked: promotionLane.current_day?.available === true,
+    what_if_only: false,
+    execution_source: "ibkr_paper",
+    live_trading_authority: false,
+    combined_portfolio_claim: false,
+    current_day: {
+      ...promotionLane.current_day,
+      pnl_eur: promotionLane.current_day?.actual_pnl_eur
+    },
+    promotion_evidence: promotionLane.promotion_progress
+  } : null) : legacyLane;
+  if (!lane) return makeNoahProbeFallback(`${metadata.label} Paper-Lane fehlt`);
+
+  const authoritySafe = (promotionLane ? promotionLane.paper_only === true && promotionLane.pnl_basis === "actual_broker_paper" : lane.paper_only === true)
+    && lane.what_if_only !== true
+    && lane.execution_source === "ibkr_paper"
+    && lane.live_trading_authority === false
+    && lane.combined_portfolio_claim !== true;
+  if (!authoritySafe) return makeNoahProbeFallback(`${metadata.label} Authority blockiert`);
+
+  const day = paperLaneWindow(lane, "day");
+  const week = paperLaneWindow(lane, "week");
+  const state = String(day.state || lane.state || lane.status || "unavailable").trim().toLowerCase();
+  const dayAvailable = lane.booked === true && (day.available === true || ["booked", "no_trades"].includes(state));
+  const weeklyAvailable = week.available === true;
+  const dailyPnl = dayAvailable ? paperLanePnl(day, lane.booked_pnl_eur ?? lane.daily_pnl_eur) : Number.NaN;
+  const weeklyPnl = weeklyAvailable ? paperLanePnl(week) : Number.NaN;
+  const promotion = lane.promotion_evidence && typeof lane.promotion_evidence === "object"
+    ? lane.promotion_evidence
+    : observerCard?.promotion_evidence?.[lane.lane_id] || {};
+  const promotionState = String(promotion.state || promotion.status || "not_assessed").trim().toLowerCase();
+  const promotionGateUnsafe = promotion.promotion_allowed === true;
+  const blocked = ["blocked", "error", "failed", "invalid", "unavailable"].includes(state) || promotionGateUnsafe;
+  const available = Number.isFinite(dailyPnl) || Number.isFinite(weeklyPnl);
+  const warnings = {};
+  if (!Number.isFinite(dailyPnl)) warnings.day = String(day.reason || lane.reason || "Tages-Paper-PnL nicht verfuegbar");
+  if (!Number.isFinite(weeklyPnl)) warnings.week = String(week.reason || "Wochen-Paper-PnL nicht verfuegbar");
+  if (promotionState !== "eligible") warnings.promotion = String((promotion.blockers || [])[0] || `Promotion: ${promotionState}`);
+  if (promotionGateUnsafe) warnings.promotion_authority = "Promotion-Freigabe ist auf der Read-only-Kachel unzulaessig";
+
+  return {
+    checked_at: observerCard?.generated_at_utc || observerCard?.updated_at || nowIso(),
+    selected_market: marketView,
+    selected_market_label: String(lane.label || metadata.label),
+    market_closed: false,
+    cycle: {
+      market_label: metadata.label,
+      mode_label: metadata.roleLabel,
+      next_cycle_at: null,
+      trading: available && !blocked
+    },
+    pnl: {
+      daily_eur: dailyPnl,
+      weekly_eur: weeklyPnl,
+      daily_pct: Number.NaN,
+      weekly_pct: Number.NaN,
+      kind: "paper_lane",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: paperLaneTradeCount(day, lane) },
+    live: {
+      configured_markets: [metadata.label],
+      configured_products: ["IBKR PAPER"],
+      trading_markets: available && !blocked ? [metadata.label] : [],
+      trading_products: available && !blocked ? ["IBKR PAPER"] : []
+    },
+    lane: {
+      id: lane.lane_id,
+      book_id: lane.book_id || lane.track?.book_id,
+      strategy_lineage_id: lane.strategy_lineage_id,
+      role: metadata.role,
+      state,
+      promotion_state: promotionState,
+      promotion_allowed: false,
+      promotion_tracks: lane.tracks
+    },
+    warnings,
+    view_status: blocked ? "error" : available ? (Object.keys(warnings).length ? "warn" : "ok") : "warn",
+    view_status_label: `${metadata.roleLabel} · ${state.toUpperCase()}`.slice(0, 18)
+  };
+}
+
 async function probeNoahMonitor(selectedMarket = "combined") {
   const marketView = normalizeNoahViewMarket(selectedMarket);
   if (marketView === "mlb_elo_v2") {
@@ -2841,6 +2977,13 @@ async function probeNoahMonitor(selectedMarket = "combined") {
       return makeNoahProbeFallback("Noah API Basis-URL fehlt");
     }
     const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
+    if (PAPER_LANE_VIEW_METADATA[marketView]) {
+      const observerCard = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
+        { timeoutMs }
+      );
+      return buildPaperLaneSummary(observerCard, marketView);
+    }
     if (isMambaView(marketView)) {
       const observerCard = await fetchJson(
         createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
@@ -3034,7 +3177,16 @@ function buildNoahTiles(summary) {
   const closedLiveFooter = selectedMarket === "combined" ? configuredMarkets : selectedMarketLabel || configuredMarkets;
   const pnlCurrency = String(pnl.currency || "EUR").toUpperCase() === "USD" ? "USD" : "EUR";
   const isWhatIfPnl = pnl.kind === "what_if";
+  const isPaperLanePnl = pnl.kind === "paper_lane";
   const isCumulativePaperPnl = pnl.kind === "cumulative_paper";
+  const promotionTracks = summary?.lane?.promotion_tracks || {};
+  const allPaperTrack = promotionTracks.all_valid_paper_strategy_track || {};
+  const brokerTrack = promotionTracks.broker_actual_track || {};
+  const promotionCounter = Number.isInteger(allPaperTrack.valid_day_count) && Number.isInteger(allPaperTrack.target_valid_sessions)
+    ? `${allPaperTrack.valid_day_count}/${allPaperTrack.target_valid_sessions}` : null;
+  const brokerCounter = Number.isInteger(brokerTrack.valid_day_count) && Number.isInteger(brokerTrack.target_valid_sessions)
+    ? `${brokerTrack.valid_day_count}/${brokerTrack.target_valid_sessions}` : null;
+  const promotionStateLabel = String(summary?.lane?.promotion_state || "not_assessed").toUpperCase();
   const whatIfPnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
   const whatIfComparisonLine = value => `NORM ${whatIfPnlLine(value)}`;
   const whatIfPnlStatus = value => {
@@ -3042,43 +3194,48 @@ function buildNoahTiles(summary) {
     if (!Number.isFinite(Number(value))) return "warn";
     return pnlStatus(value, degraded, hasActiveMarket);
   };
+  const paperLanePnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
+  const paperLanePnlStatus = value => {
+    if (viewStatus === "error") return "error";
+    return Number.isFinite(Number(value)) ? (viewStatus || "ok") : "warn";
+  };
   const viewStatus = ["idle", "ok", "warn", "error"].includes(summary?.view_status) ? summary.view_status : null;
 
   const tiles = {
     cycle: {
       key: "cycle",
       label: "Noah Zyklus",
-      status: isCumulativePaperPnl ? (viewStatus || "warn") : cycleStatus,
-      line1: isCumulativePaperPnl ? "PAPER" : cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
-      line2: isCumulativePaperPnl ? String(summary.view_status_label || "").slice(0, 18) : blankTileLine(),
-      footer: isCumulativePaperPnl ? "TEAMFORM" : cycleHasTimer ? "Naechste" : blankTileLine(),
+      status: isCumulativePaperPnl || isPaperLanePnl ? (viewStatus || "warn") : cycleStatus,
+      line1: isCumulativePaperPnl ? "PAPER" : isPaperLanePnl ? String(summary.lane?.role === "primary" ? "PRIMARY" : "CHALLENGER") : cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
+      line2: isCumulativePaperPnl ? String(summary.view_status_label || "").slice(0, 18) : isPaperLanePnl ? `${promotionStateLabel}${brokerCounter ? ` · ${brokerCounter}` : ""}`.slice(0, 18) : blankTileLine(),
+      footer: isCumulativePaperPnl ? "TEAMFORM" : isPaperLanePnl ? "LANE ROLE" : cycleHasTimer ? "Naechste" : blankTileLine(),
       updatedAt
     },
     weekly_pnl: {
       key: "weekly_pnl",
       label: isCumulativePaperPnl ? "Paper PnL" : "Wochen PnL",
-      status: isCumulativePaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
-      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
-      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : formatSignedPercent(pnl.weekly_pct),
-      footer: isCumulativePaperPnl ? "PAPER TOTAL" : isWhatIfPnl ? "WHAT-IF" : "Woche",
+      status: isCumulativePaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : isPaperLanePnl ? `${promotionCounter || "n/a"} · ${promotionStateLabel}`.slice(0, 18) : formatSignedPercent(pnl.weekly_pct),
+      footer: isCumulativePaperPnl ? "PAPER TOTAL" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Woche",
       updatedAt
     },
     daily_pnl: {
       key: "daily_pnl",
       label: "Tages PnL",
-      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
-      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
-      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : formatSignedPercent(pnl.daily_pct),
-      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : nonTradingDay ? "Tag" : "24h",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : isPaperLanePnl ? String(summary.lane?.role || "paper").toUpperCase().slice(0, 18) : formatSignedPercent(pnl.daily_pct),
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "ECHTER PAPER-PNL" : nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
     trades_today: {
       key: "trades_today",
       label: isCumulativePaperPnl ? "Paper Trades" : "Trades Heute",
-      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
-      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
-      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
-      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : "Heute",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl || isPaperLanePnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Heute",
       updatedAt
     },
     live_markets: {
@@ -3102,6 +3259,7 @@ export {
   buildMlbEloV2Summary,
   buildMlbTeamFormV3Summary,
   buildMambaWhatIfSummary,
+  buildPaperLaneSummary,
   buildNoahSummary,
   buildNoahSummaryFromObserverLive,
   buildNoahSummaryFromStreamdeckTiles,
