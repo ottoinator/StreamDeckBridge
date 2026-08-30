@@ -34,25 +34,27 @@ test("HTTP selector migrates legacy Native95 and cycles paper lanes separately f
     assert.equal(ready, true);
 
     assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "paper_primary");
+    await writeFile(path.join(dataDir, "noah-view.json"), `${JSON.stringify({ market: "mlb_team_form_v3", updatedAt: "2026-08-02T00:00:00Z" })}\n`);
+    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "paper_primary");
     const seen = [];
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const response = await fetch(`${baseUrl}/noah/market/next`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
       assert.equal(response.status, 200);
       const payload = await response.json();
       seen.push(payload.market);
-      assert.deepEqual(payload.order, ["paper_primary", "paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3"]);
+      assert.deepEqual(payload.order, ["paper_primary", "paper_challenger", "mamba_transfer_52_95"]);
     }
-    assert.deepEqual(seen, ["paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3", "paper_primary"]);
+    assert.deepEqual(seen, ["paper_challenger", "mamba_transfer_52_95", "paper_primary"]);
 
     const selected = await fetch(`${baseUrl}/noah/market`, {
       method: "POST",
-      body: JSON.stringify({ market: "mlb_team_form_v3" }),
+      body: JSON.stringify({ market: "paper_challenger" }),
       headers: { "Content-Type": "application/json" }
     });
     assert.equal(selected.status, 200);
-    assert.equal((await selected.json()).market, "mlb_team_form_v3");
+    assert.equal((await selected.json()).market, "paper_challenger");
 
-    for (const market of ["weather_public", "btc", "crypto", "eu"]) {
+    for (const market of ["weather_public", "btc", "crypto", "eu", "mlb_elo_v2", "mlb_team_form_v3"]) {
       const rejected = await fetch(`${baseUrl}/noah/market`, {
         method: "POST",
         body: JSON.stringify({ market }),
@@ -60,7 +62,7 @@ test("HTTP selector migrates legacy Native95 and cycles paper lanes separately f
       });
       assert.equal(rejected.status, 400, market);
     }
-    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "mlb_team_form_v3");
+    assert.equal((await (await fetch(`${baseUrl}/noah/market`)).json()).market, "paper_challenger");
   } finally {
     child.kill("SIGTERM");
   }

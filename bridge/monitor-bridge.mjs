@@ -39,7 +39,7 @@ const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
 const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
-const NOAH_VIEW_MARKET_ORDER = ["paper_primary", "paper_challenger", "mamba_transfer_52_95", "mlb_elo_v2", "mlb_team_form_v3"];
+const NOAH_VIEW_MARKET_ORDER = ["paper_primary", "paper_challenger", "mamba_transfer_52_95"];
 const MAMBA_VIEW_METADATA = {
   mamba_transfer_52_95: {
     label: "MAMBA 52>95",
@@ -448,10 +448,10 @@ function normalizeNoahViewMarket(value) {
     return "paper_challenger";
   }
   if (["mlb", "mlb_elo", "mlb_elo_v2", "challenger", "challenger_engine"].includes(raw)) {
-    return "mlb_elo_v2";
+    return "paper_primary";
   }
   if (["mlb_team_form", "mlb_teamform", "mlb_team_form_v3", "team_form", "teamform"].includes(raw)) {
-    return "mlb_team_form_v3";
+    return "paper_primary";
   }
   if (["weather", "weather_lane", "weather_public", "btc", "bitcoin"].includes(raw)) {
     return "paper_primary";

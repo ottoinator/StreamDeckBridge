@@ -49,10 +49,10 @@ test("view aliases migrate legacy Native95 selections to the booked primary lane
     ["us", "us_runtime", "default_lane", "combined", "crypto", "prediction_markets"].map(normalizeNoahViewMarket),
     ["paper_primary", "paper_primary", "paper_primary", "paper_primary", "paper_primary", "paper_primary"]
   );
-  assert.equal(normalizeNoahViewMarket("mlb_elo_v2"), "mlb_elo_v2");
+  assert.equal(normalizeNoahViewMarket("mlb_elo_v2"), "paper_primary");
   assert.equal(normalizeNoahViewMarket("weather"), "paper_primary");
   assert.equal(normalizeNoahViewMarket("btc"), "paper_primary");
-  assert.equal(normalizeNoahViewMarket("teamform"), "mlb_team_form_v3");
+  assert.equal(normalizeNoahViewMarket("teamform"), "paper_primary");
   assert.equal(normalizeNoahViewMarket("mamba_transfer"), "mamba_transfer_52_95");
   assert.equal(normalizeNoahViewMarket("native95"), "paper_primary");
   assert.equal(normalizeNoahViewMarket("mamba_native95"), "paper_primary");
