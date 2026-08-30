@@ -1,0 +1,10 @@
+services:
+  qa:
+    build:
+      context: .
+      dockerfile: Dockerfile.qa
+    environment:
+      CODEX_MONITOR_MLB_ELO_V2_ROOT: /fixtures/mlb
+      CODEX_MONITOR_MLB_TEAM_FORM_V3_ROOT: /fixtures/mlb-team-form
+    volumes:
+      - ./.qa:/app/.qa

@@ -1,7 +1,7 @@
 export type SlotStatus = "idle" | "running" | "needs_input" | "error" | "done";
 export type AgentStatus = "online" | "attention" | "offline";
 export type NoahTileStatus = "idle" | "ok" | "warn" | "error";
-export type NoahTileKey = "xetra_status" | "xetra_cycle" | "us_status" | "us_cycle";
+export type NoahTileKey = "cycle" | "weekly_pnl" | "daily_pnl" | "trades_today" | "live_markets";
 
 export type SlotState = {
   slot: number;
@@ -48,6 +48,19 @@ export type MonitorState = {
 export const BRIDGE_URL = process.env.CODEX_MONITOR_URL || "http://127.0.0.1:4567/state";
 export const POLL_INTERVAL_MS = 1_000;
 
+export async function cycleNoahMarketView(): Promise<void> {
+  const response = await fetch(new URL("/noah/market/next", BRIDGE_URL).toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: "{}"
+  });
+  if (!response.ok) {
+    throw new Error(`Noah market view cycle failed: HTTP ${response.status}`);
+  }
+}
+
 const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: string }> = {
   idle: { title: "IDLE", color: "#5f6368", dot: "#d0d4d9" },
   running: { title: "LAEUFT", color: "#1565c0", dot: "#6ec6ff" },
@@ -62,7 +75,7 @@ const AGENT_STATUS_META: Record<AgentStatus, { title: string; color: string; dim
   offline: { title: "OFFLINE", color: "#7f1d1d", dimColor: "#4d1010", dot: "#fca5a5", dimDot: "#5f1414" }
 };
 
-const NOAH_TILE_ORDER: NoahTileKey[] = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
+const NOAH_TILE_ORDER: NoahTileKey[] = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
 const NOAH_TILE_META: Record<NoahTileStatus, { title: string; color: string; dot: string }> = {
   idle: { title: "BEREIT", color: "#4b5563", dot: "#cbd5e1" },
   ok: { title: "OK", color: "#166534", dot: "#86efac" },
@@ -99,10 +112,11 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
 
 export function defaultNoahTile(key: NoahTileKey): NoahTileState {
   const labels: Record<NoahTileKey, string> = {
-    xetra_status: "Xetra",
-    xetra_cycle: "Xetra Zyklus",
-    us_status: "US Handel",
-    us_cycle: "US Zyklus"
+    cycle: "Noah Zyklus",
+    weekly_pnl: "Wochen PnL",
+    daily_pnl: "Tages PnL",
+    trades_today: "Trades Heute",
+    live_markets: "Live Markt"
   };
   return {
     key,
@@ -204,8 +218,8 @@ export function normalizeState(payload: unknown): MonitorState {
         blinkUntil: typeof agent.blinkUntil === "string" ? agent.blinkUntil : item.blinkUntil
       };
     }),
-    noahTiles: fallback.noahTiles.map((item, index) => {
-      const candidate = noahTiles[index];
+    noahTiles: fallback.noahTiles.map(item => {
+      const candidate = noahTiles.find(tile => tile && typeof tile === "object" && (tile as Partial<NoahTileState>).key === item.key);
       if (!candidate || typeof candidate !== "object") {
         return item;
       }
@@ -231,6 +245,10 @@ function escapeXml(input: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function wrapText(value: string, maxLineLength: number, maxLines: number): string[] {
@@ -311,7 +329,7 @@ export function slotSvg(slot: SlotState): string {
     .map((line, index) => `<text x="8" y="${40 + index * 9}" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${meta.color}" />
       <rect x="5" y="5" width="62" height="62" rx="10" fill="rgba(255,255,255,0.08)" />
@@ -321,7 +339,7 @@ export function slotSvg(slot: SlotState): string {
       ${titleSvg}
       ${detailSvg}
     </svg>
-  `)}`;
+  `);
 }
 
 export function agentSvg(agent: AgentState): string {
@@ -372,7 +390,7 @@ export function agentSvg(agent: AgentState): string {
     .map((line, index) => `<text x="36" y="${53 + index * 8}" text-anchor="middle" font-size="8" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${backgroundColor}" />
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.06)" />
@@ -382,7 +400,7 @@ export function agentSvg(agent: AgentState): string {
       ${titleSvg}
       ${detailSvg}
     </svg>
-  `)}`;
+  `);
 }
 
 export function noahTileSvg(tile: NoahTileState): string {
@@ -402,7 +420,7 @@ export function noahTileSvg(tile: NoahTileState): string {
     .map((line, index) => `<text x="8" y="${63 - index * 8}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
+  return svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
       <rect width="72" height="72" rx="12" fill="${meta.color}" />
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.07)" />
@@ -411,5 +429,5 @@ export function noahTileSvg(tile: NoahTileState): string {
       ${detailSvg}
       ${footerSvg}
     </svg>
-  `)}`;
+  `);
 }

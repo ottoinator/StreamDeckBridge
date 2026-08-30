@@ -1,11 +1,12 @@
 import streamDeck from "@elgato/streamdeck";
 
 import { CarmenLightAction } from "./actions/carmen-light";
+import { NoahCycleAction } from "./actions/noah-cycle";
+import { NoahDailyPnlAction } from "./actions/noah-daily-pnl";
 import { NoahLightAction } from "./actions/noah-light";
-import { NoahUsCycleAction } from "./actions/noah-us-cycle";
-import { NoahUsStatusAction } from "./actions/noah-us-status";
-import { NoahXetraCycleAction } from "./actions/noah-xetra-cycle";
-import { NoahXetraStatusAction } from "./actions/noah-xetra-status";
+import { NoahLiveMarketsAction } from "./actions/noah-live-markets";
+import { NoahTradesTodayAction } from "./actions/noah-trades-today";
+import { NoahWeeklyPnlAction } from "./actions/noah-weekly-pnl";
 import { Slot1Action } from "./actions/slot-1";
 import { Slot2Action } from "./actions/slot-2";
 import { Slot3Action } from "./actions/slot-3";
@@ -25,10 +26,11 @@ streamDeck.actions.registerAction(new Slot3Action());
 streamDeck.actions.registerAction(new Slot4Action());
 streamDeck.actions.registerAction(new NoahLightAction());
 streamDeck.actions.registerAction(new CarmenLightAction());
-streamDeck.actions.registerAction(new NoahXetraStatusAction());
-streamDeck.actions.registerAction(new NoahXetraCycleAction());
-streamDeck.actions.registerAction(new NoahUsStatusAction());
-streamDeck.actions.registerAction(new NoahUsCycleAction());
+streamDeck.actions.registerAction(new NoahCycleAction());
+streamDeck.actions.registerAction(new NoahWeeklyPnlAction());
+streamDeck.actions.registerAction(new NoahDailyPnlAction());
+streamDeck.actions.registerAction(new NoahTradesTodayAction());
+streamDeck.actions.registerAction(new NoahLiveMarketsAction());
 
 async function applyMonitorState(payload: unknown) {
   const state = normalizeState(payload);

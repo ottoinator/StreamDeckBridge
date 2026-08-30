@@ -6,34 +6,34 @@ In this repository, Codex should report active chat state to the local Stream De
 
 1. At the start of substantial work, run:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action register -Watch
+```bash
+node scripts/codex-bridge-thread.mjs register --watch
 ```
 
 2. After meaningful milestones, send a short progress update:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action progress -Detail "Kurzer Zwischenstand"
+```bash
+node scripts/codex-bridge-thread.mjs progress --detail "Kurzer Zwischenstand"
 ```
 
 3. If user input is required, signal it before asking:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action needs_input -Detail "Entscheidung offen"
+```bash
+node scripts/codex-bridge-thread.mjs needs_input --detail "Entscheidung offen"
 ```
 
 4. On completion or failure, close the reported state:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action done -Detail "Erfolgreich beendet"
+```bash
+node scripts/codex-bridge-thread.mjs done --detail "Erfolgreich beendet"
 ```
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action error -Detail "Fehler" -ExitCode 1
+```bash
+node scripts/codex-bridge-thread.mjs error --detail "Fehler" --exit-code 1
 ```
 
 ## Notes
 
-- The helper script uses `CODEX_THREAD_ID` automatically.
+- The macOS helper script uses `CODEX_THREAD_ID` automatically. Windows can still use `scripts/codex-bridge-thread.ps1`.
 - Keep bridge details glanceable and short.
 - If the bridge is unavailable, continue the main task and mention the bridge issue briefly.

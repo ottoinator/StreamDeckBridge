@@ -1,15 +1,16 @@
 # Codex Stream Deck Monitor
 
-Lokale Windows-Integration fuer Elgato Stream Deck und Codex.
+Lokale macOS-Integration fuer Elgato Stream Deck und Codex. Die fruehere Windows-Integration bleibt als Legacy-Pfad erhalten.
 
 Die Loesung besteht aus zwei Teilen:
 
 - `bridge/monitor-bridge.mjs`: lokale Status-Bridge mit 4 festen Slots
-- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 4 Noah-Monitor-Kacheln fuer Xetra- und US-Betrieb
+- `streamdeck-plugin/com.codex.stream-monitor.sdPlugin`: Stream-Deck-Plugin mit 4 Slot-Tasten, 2 Agenten-Leuchten fuer `Noah` und `Carmen` sowie 5 Noah-Monitor-Kacheln fuer Cycle, Wochen-PnL, Tages-PnL, Trades und Live-Maerkte
 
-Fuer Codex-Chats gibt es jetzt zusaetzlich einen expliziten Meldeweg:
+Fuer Codex-Chats gibt es einen expliziten Meldeweg:
 
-- `scripts/codex-bridge-thread.ps1`: registriert den aktuellen Chat ueber `CODEX_THREAD_ID`, sendet Heartbeats und setzt `needs_input`, `done` oder `error`
+- `scripts/codex-bridge-thread.mjs`: registriert den aktuellen Chat ueber `CODEX_THREAD_ID`, sendet Heartbeats und setzt `needs_input`, `done` oder `error`
+- `scripts/codex-bridge-thread.ps1`: Legacy-Variante fuer Windows
 - `plugins/codex-bridge-reporter`: repo-lokales Codex-Plugin mit Skill-Doku fuer denselben Ablauf
 
 ## Statusmodell
@@ -45,84 +46,103 @@ Die Bridge arbeitet jetzt explizit thread-basiert:
 
 Chat registrieren und Heartbeat-Loop starten:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action register -Watch
+```bash
+node scripts/codex-bridge-thread.mjs register --watch
 ```
 
 Zwischenstand senden:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action progress -Detail "Analysiert Bridge"
+```bash
+node scripts/codex-bridge-thread.mjs progress --detail "Analysiert Bridge"
 ```
 
 Rueckfrage signalisieren:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action needs_input -Detail "Architektur offen"
+```bash
+node scripts/codex-bridge-thread.mjs needs_input --detail "Architektur offen"
 ```
 
 Erfolgreich abschliessen:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action done -Detail "Fertig"
+```bash
+node scripts/codex-bridge-thread.mjs done --detail "Fertig"
 ```
 
 Fehler signalisieren:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action error -Detail "Build fehlgeschlagen" -ExitCode 1
+```bash
+node scripts/codex-bridge-thread.mjs error --detail "Build fehlgeschlagen" --exit-code 1
 ```
 
 Thread aus der Bridge entfernen:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-bridge-thread.ps1 -Action clear
+```bash
+node scripts/codex-bridge-thread.mjs clear
 ```
 
 ## Schnellstart
 
 1. Abhaengigkeiten installieren:
 
-```powershell
+```bash
 npm install
 ```
 
 2. Plugin bauen:
 
-```powershell
+```bash
 npm run build
 ```
 
 3. Plugin in Stream Deck installieren:
 
-```powershell
+```bash
 npm run plugin:install
 ```
 
 4. Bridge starten:
 
-```powershell
+```bash
 npm run bridge
 ```
 
-5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex` auf ein Profil ziehen.
-   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4`, `Noah Light`, `Carmen Light`, `Noah Xetra Status`, `Noah Xetra Cycle`, `Noah US Status` und `Noah US Cycle`.
+5. In der Stream-Deck-App die gewuenschten Tasten aus der Kategorie `Codex Monitor` auf ein Profil ziehen.
+   Verfuegbar sind `Codex Slot 1` bis `Codex Slot 4`, `Noah Light`, `Carmen Light` sowie die Noah-Kacheln fuer Cycle, Wochen-PnL, Tages-PnL, Trades Heute und Live-Maerkte.
 
-## Autostart ohne Shell-Fenster
+## Autostart auf macOS
 
 Bridge einmal als Hintergrunddienst-Ersatz einrichten:
 
-```powershell
+```bash
 npm run service:install
 ```
 
-Das nutzt auf diesem Windows-Rechner einen versteckten Autostart-Launcher im Startup-Ordner, falls der Task Scheduler keine Registrierung erlaubt.
+Die Installation legt einen LaunchAgent unter `~/Library/LaunchAgents/com.codex.streamdeckbridge.plist` an und startet die Bridge im Benutzerkontext. Das passt zur Stream-Deck-App, die ebenfalls als Benutzer-App laeuft.
+
+Logs liegen unter:
+
+```text
+logs/bridge.out.log
+logs/bridge.err.log
+```
 
 Manuell starten und stoppen:
 
-```powershell
+```bash
 npm run service:start
 npm run service:stop
+```
+
+Die eigentliche Bridge laeuft dabei ueber:
+
+```text
+scripts/start-bridge-macos.sh
+```
+
+Diagnose:
+
+```bash
+npm run doctor
 ```
 
 ## Slots manuell setzen
@@ -201,10 +221,11 @@ node .\bridge\monitor-bridge.mjs set-agent --agent noah --status offline --detai
 
 ### Tokenbasierte Agenten-Aktivitaet
 
-Fuer Noah und Carmen kann die Bridge optional statt SSH einen schlanken HTTP-JSON-Endpunkt auf dem jeweiligen VPS abfragen:
+Fuer Noah kann die Bridge optional statt SSH einen schlanken HTTP-JSON-Endpunkt auf dem VPS abfragen. Carmen laeuft auf macOS standardmaessig gegen den lokalen Docker-Container `carmen-runtime` und liest dort `integrations/whatsapp/openai_activity.py` per `docker exec`:
 
 - `CODEX_MONITOR_NOAH_STATUS_URL`
 - `CODEX_MONITOR_CARMEN_STATUS_URL`
+- `CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND`
 
 Optional:
 
@@ -238,16 +259,19 @@ Alternativ reicht auch:
 }
 ```
 
-Die Bridge erkennt daraus echte OpenAI-Aktivitaet und laesst die Leuchte blinken, wenn Tokenverbrauch steigt oder juengste Aktivitaet gemeldet wird.
+Die Carmen-Kachel zeigt bewusst das aktuelle Fenster als `OpenAI <tokens> Tok/<minuten>m`. Historische Gesamtsummen werden nicht mehr als Haupttext angezeigt, damit `3.6M Tok ges.` nicht wie aktueller Verbrauch wirkt. Die Leuchte blinkt nur bei Aktivitaet im aktuellen Fenster.
+
+Noah ist eine Python-only-Runtime. Die Noah-Agentenleuchte nutzt deshalb keine OpenAI-Tokens, sondern den vorhandenen Noah-Monitor: Zykluszeit, Marktstatus, PnL und Trade-Zaehler bilden eine Runtime-Metric. Die Kachel zeigt `Runtime <Markt> <Modus>` und blinkt, wenn sich diese Runtime-Metric aendert.
 
 In den zugehoerigen Agenten-Repos sind jetzt bereits konkrete Endpunkte vorgesehen:
 
 - Noah:
   - `http://<host>:8765/api/v1/status/openai-activity`
   - Auth: `NOAH_COMPANION_API_TOKEN`
+  - macOS-Default: `CODEX_MONITOR_NOAH_MONITOR_BASE_URL` oder `http://100.98.171.9:8765`
 - Carmen:
-  - `http://<host>:4319/status/openai-activity`
-  - Auth: `CARMEN_WHATSAPP_PUSH_TOKEN`
+  - macOS-Default: `docker exec carmen-runtime sh -lc 'cd /root/.openclaw/workspace && python3 integrations/whatsapp/openai_activity.py'`
+  - Legacy/Remote nur explizit ueber `CODEX_MONITOR_CARMEN_STATUS_URL` oder `CODEX_MONITOR_CARMEN_SSH_HOST`
 
 Eine kleine Referenz fuer so einen VPS-Endpunkt liegt hier:
 
@@ -263,14 +287,21 @@ docs/openai-agent-activity.md
 
 ## Noah-Monitor-Kacheln
 
-Die vier Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
+Die fuenf Noah-Kacheln lesen ihre Daten ueber die lokale Bridge aus Noahs Companion- und Runtime-Daten:
 
-- `Noah Xetra Status`: zeigt, ob der Xetra-Smoke laeuft und ob bereits Trades entstanden sind
-- `Noah Xetra Cycle`: zeigt letzten Xetra-Zyklus, Cycle-Zaehler und Countdown bis zum naechsten Xetra-Zyklus
-- `Noah US Status`: zeigt, ob Noah im US-Handel ist oder wie lange es noch bis zum Start dauert
-- `Noah US Cycle`: zeigt letzten US-Zyklus, Trade-Counter und Countdown bis zum naechsten US-Zyklus
+- `Noah Cycle`: zeigt den naechsten Zyklus der ausgewaehlten Noah-View
+- `Noah Weekly PnL`: zeigt die kombinierte Wochen-PnL aus Noahs Portfolio-/Trade-Truth
+- `Noah Daily PnL`: zeigt die Tages-PnL; an echten Nicht-Handelstagen wird kein alter Tageswert ausgespielt
+- `Noah Trades Today`: zeigt offene und geschlossene Trades des aktuellen Trade-Days
+- `Noah Live Markets`: zeigt die ausgewaehlte View und deren Runtime-Zustand
 
-Die Bridge zieht dafuer Noah-Daten ueber den vorhandenen `ocvps`-SSH-Zugang. Fuer Xetra wird auf die Runtime-Registry zurueckgefallen, falls der deployte Companion-API-Prozess den Xetra-Endpunkt noch nicht ausliefert.
+Ein Druck auf `Noah Live Markets` schaltet alle fuenf Noah-Kacheln read-only durch diese Ansichten: `Native95 Fixed60 Primary -> ORB13 Paper Challenger -> Mamba Transfer 52→95 What-if -> Native95 Fixed60 Primary`. MLB, BTC und Weather sind nicht mehr auswählbar. Die Auswahl wird lokal in `noah-view.json` gespeichert; sie aktiviert keine Runtime, keine Scheduler und keine Trading-/Order-Pfade. Die alten Auswahl-Keys `us`, `mamba_native95`, `mlb_elo_v2` und `mlb_team_form_v3` werden beim Lesen sicher auf `paper_primary` migriert; alte BTC-, Weather-, Crypto-, Prediction- oder Combined-Ansichten ebenfalls.
+
+Die beiden US Paper-Lane-Views und Mamba Transfer kommen ausschliesslich aus dem oeffentlichen, read-only Endpoint `/api/v1/view/observer-card`. Native95 und ORB13 akzeptieren bevorzugt `noah.us.lane-promotion-evidence.v2`; der bestehende Vertrag `noah.us.ibkr-paper-lanes.v2` bleibt kompatibel. Echte gebuchte Tages-PnL wird als `IBKR PAPER` ohne BPS-Schaetzung gezeigt und niemals addiert. Eine Wochen-PnL erscheint nur, wenn ein autoritatives Wochenfenster geliefert wird; sonst bleibt sie `n/a`. Fehlende oder pending Evidenz bleibt ebenfalls `n/a`, niemals `0,00 EUR`. Mamba Transfer bleibt davon getrennt und muss weiterhin `pnl_kind: "what_if"` liefern. Die Bridge liest weder Service-Units noch Runtime-Umgebungen und beschafft keine Tokens per SSH.
+
+Der bevorzugte additive Observer-Vertrag lautet `lane_promotion_evidence` mit `contract_version: "noah.us.lane-promotion-evidence.v2"`. Seine Lanes werden ueber `current_role` ausgewaehlt; `current_day.actual_pnl_eur` ist echte Broker-Paper-PnL, und die drei getrennten Tracks zeigen den Fortschritt gegen 40 valide Sessions. Der bestehende `paper_lane_contract` plus `paper_lanes[]` bleibt als kompatibler Paper-PnL-Vertrag lesbar, kann ohne Promotion-Tracks aber keinen Promotion-Fortschritt behaupten. Mamba Transfer bleibt unter `mamba_challengers.transfer52_to_95` mit `pnl_kind: "what_if"` erhalten.
+
+Die Wochen-PnL-Kachel behandelt `weekly_pnl_eur: 0` als autoritativen aktuellen Wochenwert. Sie darf nicht auf `realized_pnl_eur_total` zurueckfallen, weil dieser Wert markt- oder ledgeruebergreifend alte realisierte PnL enthalten kann.
 
 ## Ueber die Bridge starten
 

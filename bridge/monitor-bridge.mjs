@@ -1,17 +1,27 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.CODEX_MONITOR_PORT || 4567);
 const HOST = process.env.CODEX_MONITOR_HOST || "127.0.0.1";
-const DATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
+
+function getDefaultDataDir() {
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "CodexStreamDeckMonitor");
+  }
+  return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodexStreamDeckMonitor");
+}
+
+const DATA_DIR = process.env.CODEX_MONITOR_DATA_DIR || getDefaultDataDir();
 const DATA_FILE = path.join(DATA_DIR, "slots.json");
 const AGENTS_FILE = path.join(DATA_DIR, "agents.json");
 const THREAD_NAMES_FILE = path.join(DATA_DIR, "thread-names.json");
 const THREADS_FILE = path.join(DATA_DIR, "threads.json");
+const NOAH_VIEW_FILE = path.join(DATA_DIR, "noah-view.json");
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const ENABLE_PROCESS_AUTODETECT = process.env.CODEX_MONITOR_AUTODETECT_PROCESSES === "1";
 const VALID_STATUSES = new Set(["idle", "running", "needs_input", "error", "done"]);
@@ -28,8 +38,29 @@ const THREAD_DONE_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_DONE_TTL_MS |
 const THREAD_NEEDS_INPUT_TTL_MS = Number(process.env.CODEX_MONITOR_THREAD_NEEDS_INPUT_TTL_MS || 86_400_000);
 const AGENT_ACTIVITY_WINDOW_MS = 600_000;
 const ENABLE_REMOTE_AGENT_ACTIVITY = process.env.CODEX_MONITOR_REMOTE_AGENT_ACTIVITY === "1";
-const NOAH_TILE_ORDER = ["xetra_status", "xetra_cycle", "us_status", "us_cycle"];
+const NOAH_TILE_ORDER = ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"];
+const NOAH_VIEW_MARKET_ORDER = ["paper_primary", "paper_challenger", "mamba_transfer_52_95"];
+const MAMBA_VIEW_METADATA = {
+  mamba_transfer_52_95: {
+    label: "MAMBA 52>95",
+    laneId: "noah_us_mamba_exact6y_expanded95_whatif_v1"
+  }
+};
+const PAPER_LANE_VIEW_METADATA = {
+  paper_primary: { label: "NATIVE95 60M", role: "primary", roleLabel: "PRIMARY" },
+  paper_challenger: { label: "ORB13", role: "paper_challenger", roleLabel: "CHALLENGER" }
+};
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
+const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
+const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
+const MLB_ELO_V2_ROOT = process.env.CODEX_MONITOR_MLB_ELO_V2_ROOT || path.resolve(
+  process.cwd(),
+  "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v2"
+);
+const MLB_TEAM_FORM_V3_ROOT = String(process.env.CODEX_MONITOR_MLB_TEAM_FORM_V3_ROOT || "").trim();
+const MLB_TEAM_FORM_V3_CONTAINER = String(process.env.CODEX_MONITOR_MLB_TEAM_FORM_V3_CONTAINER || "wm-vorhersager-mlb-nextgen-team-form-paper").trim();
+const CODEX_SESSION_AUTODETECT_WINDOW_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_WINDOW_MS || 6 * 60 * 60 * 1000);
+const CODEX_SESSION_AUTODETECT_TTL_MS = Number(process.env.CODEX_MONITOR_CODEX_SESSION_TTL_MS || 15_000);
 const stateStreamClients = new Set();
 function parseOptionalNumber(value, fallback = undefined) {
   const parsed = Number(value);
@@ -50,44 +81,138 @@ function buildAgentRemoteHeaders(prefix) {
   return headers;
 }
 
-function createAgentRemoteConfig(prefix, sshHostEnv, defaultHost, commandEnv, defaultCommand) {
-  const statusUrl = process.env[`${prefix}_STATUS_URL`];
+const LEGACY_NOAH_VPS_STATUS_COMMAND = (
+  "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
+);
+
+const LEGACY_CARMEN_VPS_STATUS_COMMAND = (
+  "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
+);
+
+const DEFAULT_CARMEN_LOCAL_STATUS_COMMAND =
+  "docker exec carmen-runtime sh -lc 'cd /root/.openclaw/workspace && python3 integrations/whatsapp/openai_activity.py'";
+
+function buildUrl(baseUrl, pathname) {
+  const url = new URL(baseUrl);
+  url.pathname = pathname;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function createNoahRemoteConfig() {
+  const statusUrl = process.env.CODEX_MONITOR_NOAH_STATUS_URL;
   if (statusUrl) {
     return {
       kind: "http-json",
       url: statusUrl,
-      headers: buildAgentRemoteHeaders(prefix),
-      timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 4_000)
+      headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"),
+      timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 4_000)
+    };
+  }
+
+  const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 8_000);
+  const sshHost = process.env.CODEX_MONITOR_NOAH_SSH_HOST;
+  if (sshHost || process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND) {
+    return {
+      kind: "ssh-json",
+      host: sshHost || "ocvps",
+      command: process.env.CODEX_MONITOR_NOAH_STATUS_COMMAND || LEGACY_NOAH_VPS_STATUS_COMMAND,
+      timeoutMs
+    };
+  }
+
+  return {
+    kind: "http-json",
+    url: buildUrl(process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL || DEFAULT_NOAH_MONITOR_BASE_URL, "/api/v1/status/openai-activity"),
+    headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"),
+    timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_STATUS_TIMEOUT_MS, 4_000)
+  };
+}
+
+function formatRuntimeAge(value) {
+  const timestamp = Date.parse(String(value || ""));
+  if (Number.isNaN(timestamp)) {
+    return "";
+  }
+  return formatAgeCompact(Date.now() - timestamp);
+}
+
+function makeNoahRuntimeProbe(summary) {
+  if (!summary || summary.error) {
+    return makeProbeResult("offline", `Noah offline: ${summary?.error || "Keine Monitor-Daten"}`);
+  }
+  const cycle = summary.cycle || {};
+  const pnl = summary.pnl || {};
+  const trades = summary.trades_today || {};
+  const live = summary.live || {};
+  const tradingMarkets = Array.isArray(live.trading_markets) ? live.trading_markets : [];
+  const configuredMarkets = Array.isArray(live.configured_markets) ? live.configured_markets : [];
+  const marketLabel = cycle.market_label || tradingMarkets[0] || configuredMarkets[0] || "Noah";
+  const modeLabel = cycle.mode_label || (cycle.trading ? "Live" : "Idle");
+  const status = summary.stale_reason ? "attention" : "online";
+  const checkedAge = formatRuntimeAge(summary.checked_at);
+  const detail = cycle.trading
+    ? `Runtime ${marketLabel} ${modeLabel}`.trim()
+    : `Runtime ${marketLabel} idle`.trim();
+  const activityMetric = [
+    cycle.next_cycle_at || "",
+    cycle.trading ? "open" : "closed",
+    Math.round(Number(pnl.daily_eur || 0) * 100),
+    Math.round(Number(pnl.weekly_eur || 0) * 100),
+    Number(trades.open || 0),
+    Number(trades.closed || 0)
+  ].join(":");
+  return makeProbeResult(status, checkedAge ? `${detail} (${checkedAge})` : detail, {
+    activityMetric,
+    allowRemoteActivity: true
+  });
+}
+
+function createCarmenRemoteConfig() {
+  const statusUrl = process.env.CODEX_MONITOR_CARMEN_STATUS_URL;
+  if (statusUrl) {
+    return {
+      kind: "http-json",
+      url: statusUrl,
+      headers: buildAgentRemoteHeaders("CODEX_MONITOR_CARMEN"),
+      timeoutMs: parseOptionalNumber(process.env.CODEX_MONITOR_CARMEN_STATUS_TIMEOUT_MS, 4_000)
+    };
+  }
+
+  const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_CARMEN_STATUS_TIMEOUT_MS, 8_000);
+  const sshHost = process.env.CODEX_MONITOR_CARMEN_SSH_HOST;
+  if (sshHost) {
+    return {
+      kind: "ssh-json",
+      host: sshHost,
+      command: process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND || LEGACY_CARMEN_VPS_STATUS_COMMAND,
+      timeoutMs
+    };
+  }
+
+  if (process.platform === "darwin" || process.env.CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND) {
+    return {
+      kind: "local-json",
+      command:
+        process.env.CODEX_MONITOR_CARMEN_LOCAL_STATUS_COMMAND ||
+        process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND ||
+        DEFAULT_CARMEN_LOCAL_STATUS_COMMAND,
+      timeoutMs
     };
   }
 
   return {
     kind: "ssh-json",
-    host: process.env[sshHostEnv] || defaultHost,
-    command: process.env[commandEnv] || defaultCommand,
-    timeoutMs: parseOptionalNumber(process.env[`${prefix}_STATUS_TIMEOUT_MS`], 8_000)
+    host: "carmen-vps",
+    command: process.env.CODEX_MONITOR_CARMEN_STATUS_COMMAND || LEGACY_CARMEN_VPS_STATUS_COMMAND,
+    timeoutMs
   };
 }
 
 const AGENT_REMOTE_DEFAULTS = {
-  noah: createAgentRemoteConfig(
-    "CODEX_MONITOR_NOAH",
-    "CODEX_MONITOR_NOAH_SSH_HOST",
-    "ocvps",
-    "CODEX_MONITOR_NOAH_STATUS_COMMAND",
-    (
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json\nbase=Path('/root/.openclaw/workspace/.pi')\nfiles={\n  'paper_cycle': base/'paper_cycle.log.jsonl',\n  'main_bundle': base/'artifacts'/'noah3'/'main_decision_bundle.json',\n  'companion_log': base/'companion_api.log',\n  'companion_access_log': base/'companion_api_access.log.jsonl',\n  'owner_health_alert_state': base/'owner_health_alert_state.json',\n  'main_sessions': Path('/root/.openclaw/agents/main/sessions')/'sessions.json',\n}\nout={}\nfor key, path in files.items():\n    out[key]={'exists': path.exists(), 'mtime': path.stat().st_mtime if path.exists() else None}\nlatest_session=None\nsessions_dir=Path('/root/.openclaw/agents/main/sessions')\nif sessions_dir.exists():\n    files=sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session={'exists': True, 'mtime': files[0].stat().st_mtime, 'name': files[0].name}\nout['latest_session']=latest_session\nprint(json.dumps(out))\nPY"
-    )
-  ),
-  carmen: createAgentRemoteConfig(
-    "CODEX_MONITOR_CARMEN",
-    "CODEX_MONITOR_CARMEN_SSH_HOST",
-    "carmen-vps",
-    "CODEX_MONITOR_CARMEN_STATUS_COMMAND",
-    (
-      "python3 - <<'PY'\nfrom pathlib import Path\nimport json, subprocess\nstatus = json.loads(subprocess.check_output(['python3','/root/.openclaw/workspace/integrations/whatsapp/vnext_status.py'], text=True))\nsessions_dir = Path('/root/.openclaw/agents/main/sessions')\nlatest_session_mtime = None\nlatest_session_file = None\nif sessions_dir.exists():\n    files = sorted([p for p in sessions_dir.glob('*.jsonl')], key=lambda p: p.stat().st_mtime, reverse=True)\n    if files:\n        latest_session_file = files[0].name\n        latest_session_mtime = files[0].stat().st_mtime\nroots = [\n    Path('/root/.openclaw/workspace/integrations/whatsapp/logs'),\n    Path('/root/.openclaw/workspace/integrations/whatsapp/state'),\n    Path('/root/.openclaw/agents/main/sessions'),\n]\nrecent_mtime = None\nrecent_file = None\nfor root in roots:\n    if not root.exists():\n        continue\n    for candidate in root.rglob('*'):\n        try:\n            if not candidate.is_file():\n                continue\n            mtime = candidate.stat().st_mtime\n        except Exception:\n            continue\n        if recent_mtime is None or mtime > recent_mtime:\n            recent_mtime = mtime\n            recent_file = str(candidate)\nstatus['mainSessions'] = {'latestFile': latest_session_file, 'latestMtime': latest_session_mtime}\nstatus['activityFiles'] = {'latestFile': recent_file, 'latestMtime': recent_mtime}\nprint(json.dumps(status))\nPY"
-    )
-  )
+  noah: createNoahRemoteConfig(),
+  carmen: createCarmenRemoteConfig()
 };
 const agentProbeCache = new Map();
 const agentProbeInflight = new Map();
@@ -102,141 +227,93 @@ const noahTradeCounterCache = {
   us: { value: null, cachedAt: 0 }
 };
 let noahMonitorInflight = null;
+const codexSessionAutodetectCache = {
+  cachedAt: 0,
+  result: null,
+  inflight: null
+};
 const NOAH_MONITOR_DEFAULTS = {
   host: process.env.CODEX_MONITOR_NOAH_SSH_HOST || (AGENT_REMOTE_DEFAULTS.noah.kind === "ssh-json" ? AGENT_REMOTE_DEFAULTS.noah.host : "ocvps"),
   command:
     process.env.CODEX_MONITOR_NOAH_MONITOR_COMMAND ||
     String.raw`python3 - <<'PY'
-import json,subprocess,urllib.request
-from datetime import datetime,time,timedelta,timezone
-from pathlib import Path
-from zoneinfo import ZoneInfo
-B=Path('/root/.openclaw/workspace/.pi');R=B/'artifacts'/'xetra_behavior_smoke_registry.json'
-def p(v):
-    try:return datetime.fromisoformat(str(v)) if v else None
-    except Exception:return None
-def iso(v): return v.isoformat() if v else None
-def r(x):
-    try:return json.loads(Path(x).read_text(encoding='utf-8')) if x and Path(x).exists() else None
-    except Exception:return None
-def jl(x):
-    if not x or not Path(x).exists(): return None
-    last=None
-    try:
-        for line in Path(x).open('r',encoding='utf-8'):
-            line=line.strip()
-            if line: last=json.loads(line)
-    except Exception:return None
-    return last
-def tok():
-    try:s=subprocess.check_output(['systemctl','cat','noah_companion_api.service'],text=True)
-    except Exception:return None
-    for line in s.splitlines():
-        if line.startswith('Environment=NOAH_COMPANION_API_TOKEN='): return line.split('=',2)[2].strip()
-def get(path,t):
+import json,urllib.request
+def get(path,t,timeout=20):
     h={'Accept':'application/json'}
     if t: h['Authorization']='Bearer '+t
-    with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765'+path,headers=h),timeout=6) as y: return json.load(y)
-def safe(path,t):
-    try:return get(path,t),None
-    except Exception as e:return None,str(e)
-def nxt(now):
-    et=ZoneInfo('America/New_York'); de=ZoneInfo('Europe/Berlin'); now=now.astimezone(et); d=now.date()
-    while True:
-        c=datetime.combine(d,time(9,30),tzinfo=et)
-        if c.weekday()<5 and c>now: return c.astimezone(de)
-        d+=timedelta(days=1)
-def sump(o,k):
-    n=0
-    for v in (o or {}).values():
-        try:n+=int((v or {}).get(k) or 0)
-        except Exception:pass
-    return n
-def opn(o):
-    n=0
-    for v in (o or {}).values():
-        x=(v or {}).get('open_positions')
-        if isinstance(x,dict): n+=len(x)
-        else:
-            try:n+=int(x or 0)
-            except Exception:pass
-    return n
-def xs():
-    reg=r(R) or {}; a=reg.get('active_run') or {}; s=reg.get('scheduled_run') or {}; l=reg.get('last_run') or {}; st=None
-    for c in (a,s,l):
-        st=r(c.get('status_path'))
-        if st: break
-    if not st:
-        e=(reg.get('runs_by_trade_day') or {}).get((a or s or l or {}).get('trade_day') or '')
-        st=((e or {}).get('status')) or {}
-    iv=a.get('interval_sec') or s.get('interval_sec') or 300; lc=p(st.get('latest_cycle_ts_et')); nc=lc+timedelta(seconds=int(iv)) if lc else None
-    bd=Path(a.get('base_dir') or s.get('base_dir') or l.get('base_dir') or st.get('base_dir') or B)
-    ps=r(bd/'paper_state.json') or {}; cy=jl(bd/'paper_cycle.log.jsonl') or {}
-    return {'state':st.get('state') or a.get('state') or s.get('state') or l.get('state') or 'not_started','trade_day':st.get('trade_day') or a.get('trade_day') or s.get('trade_day') or l.get('trade_day'),'cycle_count':int(st.get('cycle_count') or 0),'roundtrip_count':int(st.get('roundtrip_count') or 0),'open_positions':opn((ps.get('policies') or (cy.get('policies') or {}))),'closed_positions':int(st.get('roundtrip_count') or 0),'latest_cycle_at':iso(lc),'next_cycle_at':iso(nc),'scheduled_start_at':iso(p(a.get('scheduled_start_berlin') or s.get('scheduled_start_berlin') or st.get('scheduled_start_berlin'))),'session_window':st.get('session_window'),'interval_sec':int(iv),'source':'registry'}
-def us(now,st,it,cy):
-    rows=(cy or {}).get('cycles') or []; cr=((st or {}).get('cycle_runtime') or {}); lc=p((((st or {}).get('system_health') or {}).get('last_successful_cycle_ts_et')) or ((rows[-1] if rows else {}).get('ts_et'))); pc=p((rows[-2] if len(rows)>=2 else {}).get('ts_et')); iv=int((lc-pc).total_seconds()) if lc and pc else int((cr.get('cycle_interval_minutes') or 10)*60)
-    if iv<=0: iv=600
-    nx=p(cr.get('next_cycle_ts_et'))
-    if not lc and nx: lc=nx-timedelta(seconds=iv)
-    ss=(((st or {}).get('trading_posture') or {}).get('session_state') or {}); pm=((it or {}).get('current_policy_metrics') or {}); ts=((it or {}).get('decision_trail_summary') or {}); rt=len(ts.get('roundtrips') or [])
-    mk=bool((it or {}).get('market_open')) or ss.get('code') in ('TRADEABLE','DEFENSIVE','CLOSE_ONLY')
-    return {'trade_day':(it or {}).get('trade_day') or (cy or {}).get('trade_day'),'market_open':mk,'session_state':ss.get('code'),'session_subtitle':ss.get('subtitle'),'headline':(((st or {}).get('human_status') or {}).get('headline')),'health':((((st or {}).get('system_health') or {}).get('status') or {}).get('code')),'last_cycle_at':iso(lc),'next_cycle_at':iso(nx or (lc+timedelta(seconds=iv) if lc else None)),'cycle_interval_sec':iv,'roundtrip_count':rt,'open_positions':sump(pm,'open_positions'),'closed_positions':max(rt,sump(ts.get('policy_summary') or {},'positions_closed'),sump(pm,'exits_today')),'entries_today':sump(pm,'entries_today'),'trade_ideas_count':int((it or {}).get('trade_ideas_count') or 0),'next_market_open_berlin':iso(nxt(now))}
-def ti(v):
-    try:return int(v or 0)
-    except Exception:return 0
-def mkt(v):
-    x=str(v or '').strip().lower()
-    if x in ('us','nyse','nasdaq','usa','united_states'): return 'us'
-    if x in ('xetra','de','germany','etr'): return 'xetra'
-    return ''
-def cnt(card, source):
-    ta=((card or {}).get('trade_activity') or {})
-    return {'open_positions':ti(ta.get('open_positions')),'closed_trades':ti(ta.get('closed_trades')),'trade_day':str((card or {}).get('trade_day') or ''),'source':source,'fresh':True,'stale':False}
-def split_dashboard(payload):
-    cards=[]
-    if isinstance(payload, list): cards=payload
-    elif isinstance(payload, dict):
-        if isinstance(payload.get('observer_card'), dict): cards=[payload.get('observer_card')]
-        elif isinstance(payload.get('cards'), list): cards=payload.get('cards')
-    out={'xetra':None,'us':None}
-    for card in cards:
-        mk=mkt((card or {}).get('active_market') or (card or {}).get('market') or (card or {}).get('market_id'))
-        if mk and out.get(mk) is None:
-            out[mk]=card
-    if len(cards)==1:
-        if out['xetra'] is None and mkt((cards[0] or {}).get('active_market') or (cards[0] or {}).get('market') or (cards[0] or {}).get('market_id'))!='us':
-            out['xetra']=cards[0]
-        if out['us'] is None and mkt((cards[0] or {}).get('active_market') or (cards[0] or {}).get('market') or (cards[0] or {}).get('market_id'))!='xetra':
-            out['us']=cards[0]
-    return out
-def trade_counter(token):
-    warnings={}
-    counters={'xetra':None,'us':None}
-    for market in ('xetra','us'):
-        card, err = safe(f'/api/v1/view/observer-card?market={market}', token)
-        if err:
-            warnings[f'observer_card_{market}']=err
-        elif isinstance(card, dict):
-            counters[market]=cnt(card, f'observer_{market}')
-    for market in ('xetra','us'):
-        if counters[market] is None:
-            counters[market]={'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}
-    return counters,warnings
-t=tok(); now=datetime.now(timezone.utc); st,se=safe('/api/v1/status/current',t); it,ie=safe('/api/v1/intraday/today',t); cy,ce=safe('/api/v1/observer/cycles?limit=3',t)
-stx,sex=safe('/api/v1/status/current?market=xetra',t); itx,iex=safe('/api/v1/intraday/today?market=xetra',t); cyx,cex=safe('/api/v1/observer/cycles?market=xetra&limit=3',t)
-tc,tw=trade_counter(t)
-u=us(now,st,it,cy)
-x=us(now,stx,itx,cyx)
-if not (stx or itx or cyx):
-    x=xs()
-x['source']=x.get('source') or ('companion_xetra' if (stx or itx or cyx) else 'registry')
-x.update({'counter': tc.get('xetra') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
-u.update({'counter': tc.get('us') or {'open_positions':0,'closed_trades':0,'trade_day':'','source':'none','fresh':False,'stale':True}})
-if not x.get('trade_day'): x['trade_day']=x['counter'].get('trade_day')
-if not u.get('trade_day'): u['trade_day']=u['counter'].get('trade_day')
-out={'checked_at':datetime.now(timezone.utc).isoformat(),'us':u,'xetra':x}; w={k:v for k,v in {'status_current':se,'intraday_today':ie,'observer_cycles':ce,'status_current_xetra':sex,'intraday_today_xetra':iex,'observer_cycles_xetra':cex,**tw}.items() if v}
-if w: out['warnings']=w
-print(json.dumps(out))
+    with urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765'+path,headers=h),timeout=timeout) as y: return json.load(y)
+def market_label(market):
+    return {'us':'US','xetra':'EU','eu_multi':'EU','japan_equities':'JP','index_futures':'IF','crypto':'CR'}.get(str(market or '').strip().lower(), str(market or '').upper()[:2] or '??')
+def product_label(market):
+    raw=str(market or '').strip().lower()
+    return 'FUT' if raw == 'index_futures' else ('CRY' if raw == 'crypto' else 'EQ')
+def short_mode(value):
+    raw=str(value or '').strip().lower()
+    mapping={'morning_burst':'Burst','open_stabilization':'Stabi','early_attack':'Attack','regular_day':'RegDay','tradeable':'Trade','defensive':'Def','close_only':'Exit','idle':'Idle'}
+    return mapping.get(raw, raw.replace('_',' ').title()[:8] if raw else 'Warte')
+t=None
+combined = get('/api/v1/status/current?market=combined', t, timeout=20)
+intraday = get('/api/v1/intraday/today?market=combined', t, timeout=20)
+markets = list(intraday.get('available_markets') or combined.get('available_markets') or [])
+rows=[]
+for market in markets:
+    status = ((combined.get('markets') or {}).get(market) or {})
+    intraday_row = ((intraday.get('markets') or {}).get(market) or {})
+    observer = get(f'/api/v1/view/observer-card?market={market}', t, timeout=20)
+    portfolio = (observer or {}).get('portfolio') or {}
+    trade_activity = (observer or {}).get('trade_activity') or {}
+    runtime_mode = (intraday_row.get('runtime_mode') or {})
+    session_status = str(status.get('market_session_status') or '').strip().lower()
+    status_trade_day = str(status.get('trade_day') or (status.get('market_session') or {}).get('trade_day') or '').strip()
+    observer_trade_day = str((observer or {}).get('trade_day') or trade_activity.get('trade_day') or '').strip()
+    portfolio_trade_day = str(portfolio.get('trade_day') or '').strip()
+    disabled = bool(status.get('disabled')) or session_status == 'disabled' or bool(runtime_mode.get('disabled')) or str(runtime_mode.get('runtime_mode') or '').strip().upper() == 'DISABLED'
+    stale_for_status_day = bool(status_trade_day and (
+        (observer_trade_day and observer_trade_day != status_trade_day) or
+        (portfolio_trade_day and portfolio_trade_day != status_trade_day)
+    ))
+    count_for_today = not disabled and not stale_for_status_day
+    rows.append({
+        'market': market,
+        'label': market_label(market),
+        'product': product_label(market),
+        'trading': session_status == 'open' and count_for_today,
+        'mode_label': short_mode(runtime_mode.get('execution_window_mode') or runtime_mode.get('runtime_mode') or session_status),
+        'next_cycle_at': (runtime_mode.get('next_regular_cycle_ts_et') or status.get('next_cycle_ts_et') or combined.get('next_cycle_ts_et')) if count_for_today else None,
+        'daily_pnl_eur': float(portfolio.get('daily_pnl_eur') or 0.0) if count_for_today else 0.0,
+        'daily_pnl_pct': float(portfolio.get('daily_pnl_pct') or 0.0) if count_for_today else 0.0,
+        'weekly_pnl_eur': float(portfolio.get('weekly_pnl_eur') or 0.0) if count_for_today else 0.0,
+        'weekly_pnl_pct': float(portfolio.get('weekly_pnl_pct') or 0.0) if count_for_today else 0.0,
+        'open_trades': int(trade_activity.get('open_positions') or 0) if count_for_today else 0,
+        'closed_trades': int(trade_activity.get('closed_trades') or 0) if count_for_today else 0,
+    })
+active_market = combined.get('active_market')
+cycle_row = next((row for row in rows if row['market'] == active_market and row.get('next_cycle_at')), None) or next((row for row in rows if row['trading'] and row.get('next_cycle_at')), None) or next((row for row in rows if row.get('next_cycle_at')), None) or next((row for row in rows if row['market'] == active_market), None) or next((row for row in rows if row['trading']), None) or (rows[0] if rows else None)
+print(json.dumps({
+    'checked_at': intraday.get('generated_at_utc') or combined.get('generated_at_utc'),
+    'cycle': {
+        'market_label': cycle_row.get('label') if cycle_row else None,
+        'mode_label': cycle_row.get('mode_label') if cycle_row else None,
+        'next_cycle_at': cycle_row.get('next_cycle_at') if cycle_row else None,
+        'trading': bool(cycle_row and cycle_row.get('trading')),
+    },
+    'pnl': {
+        'daily_eur': round(sum(row['daily_pnl_eur'] for row in rows), 2),
+        'daily_pct': round(sum(row['daily_pnl_pct'] for row in rows), 2),
+        'weekly_eur': round(sum(row['weekly_pnl_eur'] for row in rows), 2),
+        'weekly_pct': round(sum(row['weekly_pnl_pct'] for row in rows), 2),
+    },
+    'trades_today': {
+        'open': int(sum(row['open_trades'] for row in rows)),
+        'closed': int(sum(row['closed_trades'] for row in rows)),
+    },
+    'live': {
+        'configured_markets': sorted(set(row['label'] for row in rows)),
+        'configured_products': sorted(set(row['product'] for row in rows)),
+        'trading_markets': sorted(set(row['label'] for row in rows if row['trading'])),
+        'trading_products': sorted(set(row['product'] for row in rows if row['trading'])),
+    },
+}))
 PY`
 };
 
@@ -344,6 +421,82 @@ async function ensureDataFile() {
   } catch {
     await writeFile(THREADS_FILE, "[]\n", "utf8");
   }
+
+  try {
+    await readFile(NOAH_VIEW_FILE, "utf8");
+  } catch {
+    await writeFile(
+      NOAH_VIEW_FILE,
+      `${JSON.stringify({ market: "paper_primary", updatedAt: nowIso() }, null, 2)}\n`,
+      "utf8"
+    );
+  }
+}
+
+function normalizeNoahViewMarket(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["us", "us_runtime", "default", "default_lane", "combined", "all", "crypto", "prediction", "predictions", "prediction_market", "prediction_markets"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (["mamba_transfer", "mamba_transfer_52_95", "mamba_52_95", "mamba52", "transfer95"].includes(raw)) {
+    return "mamba_transfer_52_95";
+  }
+  if (["paper_primary", "primary", "mamba_native", "mamba_native95", "native95", "mamba95"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (["paper_challenger", "orb13", "orb_13", "challenger_us"].includes(raw)) {
+    return "paper_challenger";
+  }
+  if (["mlb", "mlb_elo", "mlb_elo_v2", "challenger", "challenger_engine"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (["mlb_team_form", "mlb_teamform", "mlb_team_form_v3", "team_form", "teamform"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (["weather", "weather_lane", "weather_public", "btc", "bitcoin"].includes(raw)) {
+    return "paper_primary";
+  }
+  if (!NOAH_VIEW_MARKET_ORDER.includes(raw)) {
+    throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
+  }
+  return raw;
+}
+
+async function readNoahMarketView() {
+  await ensureDataFile();
+  try {
+    const parsed = JSON.parse(await readFile(NOAH_VIEW_FILE, "utf8"));
+    return {
+      market: normalizeNoahViewMarket(parsed?.market || "us"),
+      updatedAt: parsed?.updatedAt || new Date(0).toISOString()
+    };
+  } catch {
+    const fallback = { market: "paper_primary", updatedAt: nowIso() };
+    await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(fallback, null, 2)}\n`, "utf8");
+    return fallback;
+  }
+}
+
+async function writeNoahMarketView(market) {
+  await ensureDataFile();
+  const payload = {
+    market: normalizeNoahViewMarket(market),
+    updatedAt: nowIso()
+  };
+  await writeFile(NOAH_VIEW_FILE, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return payload;
+}
+
+async function cycleNoahMarketView() {
+  const current = await readNoahMarketView();
+  const currentIndex = NOAH_VIEW_MARKET_ORDER.indexOf(current.market);
+  const nextMarket = NOAH_VIEW_MARKET_ORDER[(currentIndex + 1) % NOAH_VIEW_MARKET_ORDER.length];
+  const view = await writeNoahMarketView(nextMarket);
+  noahMonitorCache.cachedAt = 0;
+  noahMonitorCache.result = null;
+  noahMonitorInflight = null;
+  void broadcastStateStream().catch(() => {});
+  return view;
 }
 
 async function readSlots() {
@@ -869,6 +1022,221 @@ function overlayDiscoveredProcesses(slots, processes) {
   });
 }
 
+function codexSessionsRoot() {
+  return path.join(os.homedir(), ".codex", "sessions");
+}
+
+async function listCodexSessionFiles(root = codexSessionsRoot()) {
+  const files = [];
+  async function walk(current) {
+    let entries = [];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await Promise.all(entries.map(async entry => {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        return;
+      }
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        try {
+          const fileStat = await stat(fullPath);
+          files.push({ path: fullPath, mtimeMs: fileStat.mtimeMs });
+        } catch {
+        }
+      }
+    }));
+  }
+  await walk(root);
+  return files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+}
+
+function threadIdFromSessionPath(filePath) {
+  const match = path.basename(filePath).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
+  return match ? match[1] : "";
+}
+
+function parseSessionWorkdir(entry) {
+  if (entry?.type !== "response_item" || entry.payload?.type !== "function_call") {
+    return "";
+  }
+  const raw = String(entry.payload.arguments || "");
+  if (!raw) {
+    return "";
+  }
+  try {
+    const args = JSON.parse(raw);
+    return String(args.workdir || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function parseCodexSessionState(raw, filePath, mtimeMs) {
+  const threadId = threadIdFromSessionPath(filePath);
+  if (!threadId) {
+    return null;
+  }
+
+  const lines = raw.trimEnd().split(/\r?\n/).slice(-400);
+  let lastUserMessageAt = null;
+  let lastFinalAnswerAt = null;
+  let lastTaskCompleteAt = null;
+  let lastActivityAt = mtimeMs;
+  let latestWorkdir = "";
+  let latestCommentary = "";
+
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const timestamp = Date.parse(String(entry.timestamp || ""));
+    if (!Number.isNaN(timestamp)) {
+      lastActivityAt = Math.max(lastActivityAt, timestamp);
+    }
+    const workdir = parseSessionWorkdir(entry);
+    if (workdir) {
+      latestWorkdir = workdir;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "user_message") {
+      lastUserMessageAt = Math.max(lastUserMessageAt || 0, timestamp || 0);
+      continue;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "task_complete") {
+      lastTaskCompleteAt = Math.max(lastTaskCompleteAt || 0, timestamp || 0);
+      continue;
+    }
+    if (
+      entry.type === "response_item" &&
+      entry.payload?.type === "message" &&
+      entry.payload?.role === "assistant" &&
+      entry.payload?.phase === "final_answer"
+    ) {
+      lastFinalAnswerAt = Math.max(lastFinalAnswerAt || 0, timestamp || 0);
+      continue;
+    }
+    if (
+      entry.type === "response_item" &&
+      entry.payload?.type === "message" &&
+      entry.payload?.phase === "commentary" &&
+      Array.isArray(entry.payload.content)
+    ) {
+      const text = entry.payload.content
+        .map(item => item?.text || "")
+        .join(" ")
+        .trim();
+      if (text) {
+        latestCommentary = text;
+      }
+    }
+  }
+
+  const lastDoneAt = Math.max(lastFinalAnswerAt || 0, lastTaskCompleteAt || 0);
+  if (!lastUserMessageAt || lastDoneAt > lastUserMessageAt) {
+    return null;
+  }
+  if (Date.now() - lastActivityAt > CODEX_SESSION_AUTODETECT_WINDOW_MS) {
+    return null;
+  }
+
+  return {
+    threadId,
+    label: latestWorkdir ? path.basename(latestWorkdir) : `Chat ${getShortThreadToken(threadId)}`,
+    status: "running",
+    detail: latestCommentary ? latestCommentary.slice(0, 80) : "Codex arbeitet",
+    updatedAt: new Date(lastActivityAt).toISOString(),
+    startedAt: lastUserMessageAt ? new Date(lastUserMessageAt).toISOString() : new Date(lastActivityAt).toISOString(),
+    heartbeatAt: new Date(lastActivityAt).toISOString(),
+    finishedAt: null,
+    exitCode: null,
+    source: "codex-session"
+  };
+}
+
+async function discoverActiveCodexSessions() {
+  if (
+    codexSessionAutodetectCache.result &&
+    Date.now() - codexSessionAutodetectCache.cachedAt <= CODEX_SESSION_AUTODETECT_TTL_MS
+  ) {
+    return codexSessionAutodetectCache.result;
+  }
+  if (codexSessionAutodetectCache.inflight) {
+    return codexSessionAutodetectCache.inflight;
+  }
+
+  const inflight = (async () => {
+    const files = (await listCodexSessionFiles()).slice(0, 30);
+    const sessions = [];
+    for (const file of files) {
+      try {
+        const raw = await readFile(file.path, "utf8");
+        const state = parseCodexSessionState(raw, file.path, file.mtimeMs);
+        if (state) {
+          sessions.push(state);
+        }
+      } catch {
+      }
+    }
+    return sessions.sort((left, right) => {
+      const leftStarted = Date.parse(left.startedAt || left.updatedAt || nowIso());
+      const rightStarted = Date.parse(right.startedAt || right.updatedAt || nowIso());
+      if (leftStarted !== rightStarted) {
+        return leftStarted - rightStarted;
+      }
+      return left.threadId.localeCompare(right.threadId);
+    });
+  })();
+
+  codexSessionAutodetectCache.inflight = inflight;
+  try {
+    const result = await inflight;
+    codexSessionAutodetectCache.cachedAt = Date.now();
+    codexSessionAutodetectCache.result = result;
+    return result;
+  } finally {
+    if (codexSessionAutodetectCache.inflight === inflight) {
+      codexSessionAutodetectCache.inflight = null;
+    }
+  }
+}
+
+function overlayAutodetectedSessions(slots, explicitThreads, discoveredSessions) {
+  const explicitThreadIds = new Set(explicitThreads.map(thread => thread.threadId));
+  const usedSlots = new Set(
+    slots
+      .filter(slot => slot.status !== "idle" || slot.source === "codex-app")
+      .map(slot => slot.slot)
+  );
+  const freeSlots = [1, 2, 3, 4].filter(slot => !usedSlots.has(slot));
+  const candidates = discoveredSessions.filter(candidate => !explicitThreadIds.has(candidate.threadId));
+  let candidateIndex = 0;
+
+  return slots.map(slot => {
+    if (usedSlots.has(slot.slot)) {
+      return slot;
+    }
+    if (!freeSlots.includes(slot.slot)) {
+      return slot;
+    }
+    const session = candidates[candidateIndex];
+    if (!session) {
+      return slot;
+    }
+    candidateIndex += 1;
+    return {
+      ...slot,
+      ...threadToSlotState({ ...session, slot: slot.slot }, {}, session.label),
+      autodetected: true
+    };
+  });
+}
+
 async function loadEffectiveSlots() {
   const storedSlots = withHeartbeatTimeout(await readSlots());
   const cleanedSlots = storedSlots.map(slot => {
@@ -892,11 +1260,16 @@ async function loadEffectiveSlots() {
   const explicitThreads = await loadExplicitThreads();
   const explicitThreadSlots = buildExplicitThreadSlotStates(explicitThreads, threadNames);
   const withExplicitThreads = overlayExplicitThreads(cleanedSlots, explicitThreadSlots);
+  const withAutodetectedSessions = overlayAutodetectedSessions(
+    withExplicitThreads,
+    explicitThreads,
+    await discoverActiveCodexSessions()
+  );
   if (!ENABLE_PROCESS_AUTODETECT) {
-    return withExplicitThreads;
+    return withAutodetectedSessions;
   }
   const discoveredProcesses = await discoverCodexProcesses();
-  return overlayDiscoveredProcesses(withExplicitThreads, discoveredProcesses);
+  return overlayDiscoveredProcesses(withAutodetectedSessions, discoveredProcesses);
 }
 
 async function loadEffectiveAgents() {
@@ -1020,12 +1393,29 @@ async function runSshJson(host, command, timeout = 8_000) {
   return output ? JSON.parse(output) : {};
 }
 
+async function runLocalJson(command, timeout = 8_000) {
+  const { stdout } = await execFileAsync(
+    "sh",
+    ["-lc", command],
+    {
+      timeout,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    }
+  );
+  const output = String(stdout || "").trim();
+  return output ? JSON.parse(output) : {};
+}
+
 async function runRemoteProbe(config) {
   if (config?.kind === "http-json") {
     return fetchJson(config.url, {
       headers: config.headers,
       timeoutMs: config.timeoutMs
     });
+  }
+  if (config?.kind === "local-json") {
+    return runLocalJson(config.command, config.timeoutMs);
   }
   return runSshJson(config.host, config.command, config.timeoutMs);
 }
@@ -1154,22 +1544,26 @@ function deriveOpenAiActivity(payload) {
     "activity.recentActivity",
     "openai.recentActivity"
   ]);
+  const hasWindowTokens = Number.isFinite(windowTokens);
+  const hasOpenAiPayload = Boolean(payload.openai || payload.activity || payload.usage || payload.tokens || hasWindowTokens || Number.isFinite(totalTokens));
   const activityMetric =
-    firstStringValue(payload, ["activityMetric", "activity.metric", "openai.activityMetric"]) ||
-    (Number.isFinite(totalTokens)
-      ? `tokens:${Math.trunc(totalTokens)}`
-      : Number.isFinite(windowTokens)
+    (hasWindowTokens
         ? `window:${Math.trunc(windowTokens)}:${lastActivityAt || ""}`
-        : lastActivityAt
-          ? `activity:${lastActivityAt}`
-          : undefined);
+        : firstStringValue(payload, ["activityMetric", "activity.metric", "openai.activityMetric"]) ||
+          (Number.isFinite(totalTokens)
+            ? `tokens:${Math.trunc(totalTokens)}`
+            : lastActivityAt
+              ? `activity:${lastActivityAt}`
+              : undefined));
   const detail =
-    firstStringValue(payload, ["detail", "activity.detail", "openai.detail"]) ||
-    (Number.isFinite(windowTokens) && windowTokens > 0
+    (hasWindowTokens
       ? `OpenAI ${formatTokenCount(windowTokens)} Tok/${windowMinutes}m`
-      : Number.isFinite(totalTokens)
-        ? `OpenAI ${formatTokenCount(totalTokens)} Tok ges.`
-        : undefined);
+      : hasOpenAiPayload
+        ? `OpenAI 0 Tok/${windowMinutes}m`
+        : firstStringValue(payload, ["detail", "activity.detail", "openai.detail"]) ||
+          (Number.isFinite(totalTokens)
+            ? `OpenAI ${formatTokenCount(totalTokens)} Tok ges.`
+            : undefined));
 
   if (!detail && recentActivity === undefined && activityMetric === undefined) {
     return null;
@@ -1180,7 +1574,7 @@ function deriveOpenAiActivity(payload) {
     recentActivity:
       recentActivity !== undefined
         ? recentActivity
-        : Number.isFinite(windowTokens)
+        : hasWindowTokens
           ? windowTokens > 0
           : lastActivityAt
             ? isRecentIsoTimestamp(lastActivityAt, AGENT_ACTIVITY_WINDOW_MS)
@@ -1212,15 +1606,19 @@ function makeExplicitProbeResult(payload, fallbackStatus, fallbackDetail) {
     return null;
   }
 
-  return makeProbeResult(explicitStatus, explicitDetail || openAiActivity?.detail || fallbackDetail, {
+  return makeProbeResult(explicitStatus, openAiActivity?.detail || explicitDetail || fallbackDetail, {
     recentActivity: explicitRecentActivity ?? openAiActivity?.recentActivity,
-    activityMetric: explicitActivityMetric || openAiActivity?.activityMetric,
+    activityMetric: openAiActivity?.activityMetric || explicitActivityMetric,
     allowRemoteActivity: openAiActivity?.allowRemoteActivity || explicitRecentActivity !== undefined || explicitActivityMetric !== undefined
   });
 }
 
 async function probeNoahRemote() {
   try {
+    const monitorSummary = await getCachedNoahMonitor();
+    if (hasUsableNoahSummary(monitorSummary)) {
+      return makeNoahRuntimeProbe(monitorSummary);
+    }
     const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.noah);
     const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
     if (explicit) {
@@ -1254,7 +1652,7 @@ async function probeNoahRemote() {
 async function probeCarmenRemote() {
   try {
     const payload = await runRemoteProbe(AGENT_REMOTE_DEFAULTS.carmen);
-    const explicit = makeExplicitProbeResult(payload, "online", "VPS erreichbar");
+    const explicit = makeExplicitProbeResult(payload, "online", "Carmen erreichbar");
     if (explicit) {
       return explicit;
     }
@@ -1276,7 +1674,7 @@ async function probeCarmenRemote() {
       isRecentUnixTimestamp(latestActivityFileMtime, AGENT_ACTIVITY_WINDOW_MS / 1000);
 
     if (payload?.ok && receiverOk && nodeReady && nodeAuthenticated) {
-      return makeProbeResult("online", `VPS online (${mode})`, {
+      return makeProbeResult("online", `Carmen online (${mode})`, {
         activityMetric: `${lastAcceptedSeq}:${lastProcessedSeq}:${latestSeq}:${latestSessionMtime}:${latestActivityFileMtime}`,
         recentActivity: hasRecentActivity
       });
@@ -1288,7 +1686,7 @@ async function probeCarmenRemote() {
 
     return makeProbeResult("attention", "Carmen meldet Problem");
   } catch (error) {
-    return makeProbeResult("offline", `VPS offline: ${error instanceof Error ? error.message : String(error)}`);
+    return makeProbeResult("offline", `Carmen offline: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1350,6 +1748,7 @@ async function overlayRemoteAgentStates(agents) {
     const remoteActivityEnabled = probe.allowRemoteActivity || ENABLE_REMOTE_AGENT_ACTIVITY;
     const changedActivityMetric =
       remoteActivityEnabled &&
+      probe.recentActivity !== false &&
       probe.activityMetric !== undefined &&
       previous?.activityMetric !== undefined &&
       probe.activityMetric !== previous.activityMetric;
@@ -1399,6 +1798,130 @@ function formatBerlinTime(value) {
   }).format(new Date(parsed));
 }
 
+function formatSignedEuro(value, currency = "EUR") {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return `${currency} --`;
+  }
+  const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+  const formatted = new Intl.NumberFormat("de-DE", {
+    minimumFractionDigits: Math.abs(amount) < 100 ? 2 : 0,
+    maximumFractionDigits: 2
+  }).format(Math.abs(amount));
+  return `${sign}${formatted} ${currency}`;
+}
+
+function formatSignedPercent(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "--%";
+  }
+  const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+  return `${sign}${Math.abs(amount).toFixed(2)}%`;
+}
+
+function isFutureTimestamp(value) {
+  const parsed = Date.parse(String(value || ""));
+  return !Number.isNaN(parsed) && parsed > Date.now();
+}
+
+function normalizeFutureCycleTimestamp(value, intervalMinutes) {
+  const parsed = Date.parse(String(value || ""));
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  const now = Date.now();
+  if (parsed > now) {
+    return new Date(parsed).toISOString();
+  }
+  const interval = Number(intervalMinutes);
+  if (!Number.isFinite(interval) || interval <= 0) {
+    return null;
+  }
+  const intervalMs = Math.round(interval * 60_000);
+  const steps = Math.floor((now - parsed) / intervalMs) + 1;
+  return new Date(parsed + steps * intervalMs).toISOString();
+}
+
+function finiteNumber(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function nonZeroNumber(value, epsilon = 0.005) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && Math.abs(numeric) > epsilon ? numeric : null;
+}
+
+function explicitFiniteNumber(source, key) {
+  if (!source || !Object.prototype.hasOwnProperty.call(source, key)) {
+    return null;
+  }
+  const value = source[key];
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function portfolioWeekPnlEur(portfolio) {
+  const explicit = explicitFiniteNumber(portfolio, "weekly_pnl_eur");
+  if (explicit !== null) {
+    return explicit;
+  }
+  const current = finiteNumber(portfolio?.current_portfolio_value_eur, NaN);
+  const weekStart = finiteNumber(portfolio?.week_start_value_eur, NaN);
+  if (Number.isFinite(current) && Number.isFinite(weekStart)) {
+    const delta = nonZeroNumber(current - weekStart);
+    if (delta !== null) {
+      return delta;
+    }
+  }
+  return 0;
+}
+
+function portfolioWeekPnlPct(portfolio, pnlEur) {
+  const explicit = explicitFiniteNumber(portfolio, "weekly_pnl_pct");
+  if (explicit !== null) {
+    return explicit;
+  }
+  const weekStart = finiteNumber(portfolio?.week_start_value_eur, NaN);
+  if (Number.isFinite(weekStart) && Math.abs(weekStart) > 0.005) {
+    return (finiteNumber(pnlEur, 0) / weekStart) * 100;
+  }
+  return finiteNumber(portfolio?.weekly_pnl_pct, 0);
+}
+
+function chooseNoahCycleTimestamp(status, runtimeMode, topStatus = {}, isActiveMarket = false) {
+  const intervalMinutes =
+    finiteNumber(status?.cycle_interval_minutes, 0) ||
+    finiteNumber(topStatus?.cycle_interval_minutes, 0) ||
+    finiteNumber(runtimeMode?.cycle_interval_minutes, 0) ||
+    finiteNumber(runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes, 0);
+  const candidates = [
+    status?.next_cycle_ts_et,
+    status?.next_cycle_ts_utc,
+    isActiveMarket ? topStatus?.next_cycle_ts_et : null,
+    isActiveMarket ? topStatus?.next_cycle_ts_utc : null,
+    runtimeMode?.next_cycle_ts_et,
+    runtimeMode?.next_cycle_ts_utc,
+    status?.next_regular_cycle_ts_et,
+    status?.next_regular_cycle_ts_utc,
+    status?.next_regular_cycle_at,
+    runtimeMode?.next_regular_cycle_ts_et,
+    runtimeMode?.next_regular_cycle_ts_utc,
+    runtimeMode?.next_regular_cycle_at
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeFutureCycleTimestamp(candidate, intervalMinutes);
+    if (normalized && isFutureTimestamp(normalized)) {
+      return normalized;
+    }
+  }
+  return candidates.find(Boolean) || null;
+}
+
 function formatCountdown(target) {
   if (!target) {
     return "--:--";
@@ -1424,6 +1947,29 @@ function formatDateInZone(value, timeZone) {
     month: "2-digit",
     day: "2-digit"
   }).format(value);
+}
+
+function isWeekendInZone(value, timeZone) {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short"
+  }).format(value);
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+function isNoahNonTradingDay(summary, now = new Date()) {
+  if (summary?.error) {
+    return false;
+  }
+  if (["mlb_elo_v2", "mlb_team_form_v3"].includes(summary?.selected_market)) {
+    return false;
+  }
+  const live = summary?.live || {};
+  const tradingMarkets = Array.isArray(live.trading_markets) ? live.trading_markets : [];
+  if (tradingMarkets.length > 0 || summary?.cycle?.trading) {
+    return false;
+  }
+  return Boolean(summary?.market_closed) || (isWeekendInZone(now, "Europe/Berlin") && isWeekendInZone(now, "America/New_York"));
 }
 
 function normalizeTradeDay(value) {
@@ -1531,10 +2077,11 @@ function isBerlinXetraTradingWindow(now = new Date()) {
 
 function createDefaultNoahTile(key) {
   const labels = {
-    xetra_status: "Xetra",
-    xetra_cycle: "Xetra Zyklus",
-    us_status: "US Handel",
-    us_cycle: "US Zyklus"
+    cycle: "Noah Zyklus",
+    weekly_pnl: "Wochen PnL",
+    daily_pnl: "Tages PnL",
+    trades_today: "Trades Heute",
+    live_markets: "Live Markt"
   };
   return {
     key,
@@ -1547,60 +2094,43 @@ function createDefaultNoahTile(key) {
   };
 }
 
-function formatTradeCountLine(label, value) {
-  return `${label} ${Number(value || 0)}`;
+function compactCodes(values, fallback = "-") {
+  const items = Array.isArray(values)
+    ? values.map(value => String(value || "").trim()).filter(Boolean)
+    : [];
+  return items.length ? items.join(" ") : fallback;
 }
 
-function readCounterSnapshot(market, counter, nowMs = Date.now()) {
-  const normalizedMarket = market === "us" ? "us" : "xetra";
-  const open = Number(counter?.open_positions);
-  const closed = Number(counter?.closed_trades);
-  const hasValidValues = Number.isFinite(open) && Number.isFinite(closed);
-  const fresh = counter?.fresh !== false && hasValidValues;
-  const source = String(counter?.source || "");
+function blankTileLine() {
+  return " ";
+}
 
-  if (fresh) {
-    const snapshot = {
-      open: open >= 0 ? open : 0,
-      closed: closed >= 0 ? closed : 0,
-      tradeDay: String(counter?.trade_day || ""),
-      source: source || "dashboard",
-      fresh: true,
-      stale: false
-    };
-    noahTradeCounterCache[normalizedMarket] = {
-      value: snapshot,
-      cachedAt: nowMs
-    };
-    return snapshot;
+function pnlStatus(value, degraded, activeMarket = false) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "idle";
   }
-
-  const cached = noahTradeCounterCache[normalizedMarket];
-  if (cached?.value && nowMs - cached.cachedAt <= TRADE_COUNTER_CACHE_TTL_MS) {
-    return {
-      ...cached.value,
-      source: "cache",
-      fresh: false,
-      stale: true
-    };
+  if (degraded) {
+    return "warn";
   }
-
-  return {
-    open: null,
-    closed: null,
-    tradeDay: String(counter?.trade_day || ""),
-    source: source || "none",
-    fresh: false,
-    stale: true
-  };
+  if (amount > 0) {
+    return "ok";
+  }
+  if (amount < 0) {
+    return "error";
+  }
+  return activeMarket ? "ok" : "idle";
 }
 
 function makeNoahProbeFallback(message) {
   return {
     checked_at: nowIso(),
     error: String(message || "Noah Monitor nicht verfuegbar"),
-    us: null,
-    xetra: null
+    cycle: null,
+    pnl: null,
+    trades_today: null,
+    live: null,
+    markets: []
   };
 }
 
@@ -1608,7 +2138,7 @@ function hasUsableNoahSummary(summary) {
   if (!summary || summary.error) {
     return false;
   }
-  return Boolean(summary.us || summary.xetra);
+  return Boolean(summary.cycle || summary.pnl || summary.trades_today || summary.live);
 }
 
 function buildStaleNoahSummary(previous, message) {
@@ -1619,46 +2149,937 @@ function buildStaleNoahSummary(previous, message) {
   };
 }
 
-async function probeNoahMonitor() {
+function getNoahMonitorBaseUrl() {
+  for (const candidate of [
+    process.env.CODEX_MONITOR_NOAH_API_BASE_URL,
+    process.env.CODEX_MONITOR_NOAH_MONITOR_BASE_URL,
+    process.env.CODEX_MONITOR_NOAH_STATUS_URL,
+    DEFAULT_NOAH_MONITOR_BASE_URL
+  ]) {
+    const raw = String(candidate || "").trim();
+    if (!raw) {
+      continue;
+    }
+    try {
+      const url = new URL(raw);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function createNoahMonitorUrl(baseUrl, pathName, market = "combined") {
+  const url = new URL(pathName, baseUrl);
+  url.searchParams.set("market", market);
+  return url.toString();
+}
+
+function normalizeNoahMarketKey(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "combined" || raw === "all") {
+    return "combined";
+  }
+  if (raw === "xetra" || raw === "eu_multi" || raw === "eu") {
+    return "xetra";
+  }
+  if (raw === "japan_equities" || raw === "japan" || raw === "tse") {
+    return "japan_equities";
+  }
+  if (raw === "index_futures" || raw === "futures" || raw === "global_futures") {
+    return "index_futures";
+  }
+  if (raw === "crypto" || raw === "digital_assets") {
+    return "crypto";
+  }
+  if (raw === "prediction" || raw === "prediction_market" || raw === "prediction_markets" || raw === "kalshi") {
+    return "prediction_markets";
+  }
+  return raw || "us";
+}
+
+function noahMarketLabel(value) {
+  const market = normalizeNoahMarketKey(value);
+  if (market === "mamba_transfer_52_95") {
+    return MAMBA_VIEW_METADATA.mamba_transfer_52_95.label;
+  }
+  if (PAPER_LANE_VIEW_METADATA[market]) {
+    return PAPER_LANE_VIEW_METADATA[market].label;
+  }
+  if (market === "mlb_elo_v2") {
+    return "MLB V2";
+  }
+  if (market === "mlb_team_form_v3") {
+    return "MLB FORM";
+  }
+  if (market === "combined") {
+    return "COMB";
+  }
+  if (market === "xetra") {
+    return "EU";
+  }
+  if (market === "japan_equities") {
+    return "JP";
+  }
+  if (market === "index_futures") {
+    return "IF";
+  }
+  if (market === "crypto") {
+    return "CR";
+  }
+  if (market === "prediction_markets") {
+    return "PM";
+  }
+  return "US";
+}
+
+function noahProductLabel(value) {
+  const market = normalizeNoahMarketKey(value);
+  if (market === "mamba_transfer_52_95") {
+    return "WHAT-IF";
+  }
+  if (PAPER_LANE_VIEW_METADATA[market]) {
+    return "PAPER";
+  }
+  if (market === "mlb_elo_v2" || market === "mlb_team_form_v3") {
+    return "SPORT";
+  }
+  if (market === "index_futures") {
+    return "FUT";
+  }
+  if (market === "crypto") {
+    return "CRY";
+  }
+  if (market === "prediction_markets") {
+    return "PM";
+  }
+  return "EQ";
+}
+
+function shortCycleMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  const mapping = {
+    morning_burst: "Burst",
+    open_stabilization: "Stabi",
+    early_attack: "Attack",
+    regular_day: "RegDay",
+    tradeable: "Trade",
+    defensive: "Def",
+    close_only: "Exit",
+    open: "Open",
+    closed: "Close"
+  };
+  return mapping[raw] || titleCaseValue(raw || "warte").slice(0, 8);
+}
+
+function noahRuntimeModeCountsAsTrading(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return ["REGULAR_CYCLE", "PAPER_CRYPTO_SPOT"].includes(normalized);
+}
+
+function buildNoahSummaryFromStreamdeckTiles(payload) {
+  if (!payload || payload.contract_version !== "streamdeck_tiles_v1") {
+    return makeNoahProbeFallback("Noah StreamDeck Tile Contract fehlt");
+  }
+  const cycle = payload.cycle || {};
+  const pnl = payload.pnl || {};
+  const tradesToday = payload.trades_today || {};
+  const live = payload.live || {};
+  const markets = payload.markets && typeof payload.markets === "object" ? Object.values(payload.markets) : [];
+  const selectedMarket = normalizeNoahMarketKey(payload.market || payload.selected_market || "combined");
+  return {
+    checked_at: payload.generated_at_utc || nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
+    market_closed: !(Array.isArray(live.trading_markets) && live.trading_markets.length > 0),
+    cycle: cycle.market || cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et
+      ? {
+          market_label: cycle.market_label || noahMarketLabel(cycle.market),
+          mode_label: shortCycleMode(cycle.runtime_mode || (cycle.trading ? "open" : "closed")),
+          next_cycle_at: cycle.next_cycle_ts_utc || cycle.next_cycle_ts_et || null,
+          next_cycle_eta_seconds: finiteNumber(cycle.next_cycle_eta_seconds, NaN),
+          trading: Boolean(cycle.trading)
+        }
+      : null,
+    pnl: {
+      daily_eur: finiteNumber(pnl.daily_eur, 0),
+      daily_pct: finiteNumber(pnl.daily_pct, 0),
+      weekly_eur: finiteNumber(pnl.weekly_eur, 0),
+      weekly_pct: finiteNumber(pnl.weekly_pct, 0)
+    },
+    trades_today: {
+      open: Number(tradesToday.open || 0),
+      closed: Number(tradesToday.closed || 0)
+    },
+    live: {
+      configured_markets: Array.isArray(live.configured_markets) ? live.configured_markets : markets.map(row => row.label).filter(Boolean),
+      configured_products: Array.isArray(live.configured_products) ? live.configured_products : Array.from(new Set(markets.map(row => row.product).filter(Boolean))),
+      trading_markets: Array.isArray(live.trading_markets) ? live.trading_markets : [],
+      trading_products: Array.isArray(live.trading_products) ? live.trading_products : []
+    },
+    markets
+  };
+}
+
+function buildNoahSummary(statusCard, observerCard) {
+  const selectedMarket = normalizeNoahMarketKey(statusCard?.market || observerCard?.market || "combined");
+  const statusMarkets = statusCard?.markets && typeof statusCard.markets === "object" ? statusCard.markets : {};
+  const observerMarkets = observerCard?.markets && typeof observerCard.markets === "object" ? observerCard.markets : {};
+  const marketKeys = Array.from(new Set([...Object.keys(statusMarkets), ...Object.keys(observerMarkets)]));
+  const activeMarketKey = normalizeNoahMarketKey(statusCard?.active_market || observerCard?.active_market);
+  const combinedPortfolio = observerCard?.portfolio || statusCard?.portfolio || {};
+  const combinedTradeActivity = observerCard?.trade_activity || statusCard?.trade_activity || {};
+  const combinedTradeDay = String(
+    combinedTradeActivity.trade_day ||
+    combinedPortfolio.trade_day ||
+    statusCard?.trade_day ||
+    observerCard?.trade_day ||
+    ""
+  ).trim();
+  const marketRows = marketKeys.map(key => {
+    const normalizedKey = normalizeNoahMarketKey(key);
+    const status = statusMarkets[key] || {};
+    const observer = observerMarkets[key] || {};
+    const tradeActivity = observer.trade_activity || {};
+    const portfolio = observer.portfolio || {};
+    const runtimeMode = status.runtime_mode || {};
+    const sessionStatus = String(status.market_session_status || status.active_market_status || "").trim().toLowerCase();
+    const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || "").trim();
+    const observerTradeDay = String(observer.trade_day || tradeActivity.trade_day || "").trim();
+    const portfolioTradeDay = String(portfolio.trade_day || "").trim();
+    const rowTradeDay = observerTradeDay || portfolioTradeDay || statusTradeDay;
+    const staleActivityForStatusDay = Boolean(
+      statusTradeDay &&
+      observerTradeDay &&
+      observerTradeDay !== statusTradeDay
+    );
+    const stalePortfolioForStatusDay = Boolean(
+      statusTradeDay &&
+      portfolioTradeDay &&
+      portfolioTradeDay !== statusTradeDay
+    );
+    const staleForCombinedDay = Boolean(combinedTradeDay && rowTradeDay && rowTradeDay !== combinedTradeDay);
+    const staleForStatusDay = staleActivityForStatusDay || stalePortfolioForStatusDay || staleForCombinedDay;
+    const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
+    return {
+      key: normalizedKey,
+      label: noahMarketLabel(normalizedKey),
+      product: noahProductLabel(normalizedKey),
+      trading: sessionStatus === "open" && !staleForStatusDay,
+      nextCycleAt: staleActivityForStatusDay ? null : chooseNoahCycleTimestamp(status, runtimeMode, statusCard, normalizedKey === activeMarketKey),
+      modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || status.posture?.session_state || sessionStatus),
+      openTrades: staleForStatusDay ? 0 : Number(tradeActivity.open_positions || 0),
+      closedTrades: staleForStatusDay ? 0 : Number(tradeActivity.closed_trades || 0),
+      dailyPnlEur: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_eur || 0),
+      dailyPnlPct: staleForStatusDay ? 0 : Number(portfolio.daily_pnl_pct || 0),
+      weeklyPnlEur: staleForStatusDay ? 0 : weeklyPnlEur,
+      weeklyPnlPct: staleForStatusDay ? 0 : portfolioWeekPnlPct(portfolio, weeklyPnlEur),
+      staleForStatusDay
+    };
+  });
+
+  const activeCycleRow =
+    marketRows.find(row => row.key === activeMarketKey && row.nextCycleAt) ||
+    marketRows.find(row => row.trading && row.nextCycleAt) ||
+    marketRows.find(row => row.trading) ||
+    marketRows
+      .filter(row => row.nextCycleAt)
+      .sort((left, right) => Date.parse(String(left.nextCycleAt)) - Date.parse(String(right.nextCycleAt)))[0] ||
+    marketRows[0] ||
+    null;
+
+  let weeklyEur = portfolioWeekPnlEur(combinedPortfolio);
+  if (!nonZeroNumber(weeklyEur)) {
+    const activeWeekly = marketRows.find(row => row.key === activeMarketKey && nonZeroNumber(row.weeklyPnlEur));
+    const tradingWeekly = marketRows.find(row => row.trading && nonZeroNumber(row.weeklyPnlEur));
+    weeklyEur = activeWeekly?.weeklyPnlEur ?? tradingWeekly?.weeklyPnlEur ?? marketRows.reduce((sum, row) => sum + row.weeklyPnlEur, 0);
+  }
+  let weeklyPct = portfolioWeekPnlPct(combinedPortfolio, weeklyEur);
+  if (!nonZeroNumber(weeklyPct, 0.0005)) {
+    const activeWeekly = marketRows.find(row => row.key === activeMarketKey && nonZeroNumber(row.weeklyPnlPct, 0.0005));
+    const tradingWeekly = marketRows.find(row => row.trading && nonZeroNumber(row.weeklyPnlPct, 0.0005));
+    weeklyPct = activeWeekly?.weeklyPnlPct ?? tradingWeekly?.weeklyPnlPct ?? marketRows.reduce((sum, row) => sum + row.weeklyPnlPct, 0);
+  }
+  const configuredMarkets = marketRows.map(row => row.label);
+  const configuredProducts = Array.from(new Set(marketRows.map(row => row.product)));
+  const tradingMarkets = marketRows.filter(row => row.trading).map(row => row.label);
+  const tradingProducts = Array.from(new Set(marketRows.filter(row => row.trading).map(row => row.product)));
+  const marketClosed = tradingMarkets.length === 0;
+  const dailyEur = marketRows.reduce((sum, row) => sum + row.dailyPnlEur, 0);
+  const dailyPct = marketRows.reduce((sum, row) => sum + row.dailyPnlPct, 0);
+
+  return {
+    checked_at: nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
+    market_closed: marketClosed,
+    cycle: activeCycleRow && !marketClosed
+      ? {
+          market_label: activeCycleRow.label,
+          mode_label: activeCycleRow.modeLabel,
+          next_cycle_at: activeCycleRow.nextCycleAt,
+          trading: activeCycleRow.trading
+        }
+      : null,
+    pnl: {
+      daily_eur: marketClosed ? 0 : dailyEur,
+      daily_pct: marketClosed ? 0 : dailyPct,
+      weekly_eur: marketClosed ? 0 : weeklyEur,
+      weekly_pct: marketClosed ? 0 : weeklyPct
+    },
+    trades_today: {
+      open: marketClosed ? 0 : marketRows.reduce((sum, row) => sum + Math.max(0, row.openTrades || 0), 0),
+      closed: marketClosed ? 0 : marketRows.reduce((sum, row) => sum + Math.max(0, row.closedTrades || 0), 0)
+    },
+    live: {
+      configured_markets: configuredMarkets,
+      configured_products: configuredProducts,
+      trading_markets: tradingMarkets,
+      trading_products: tradingProducts
+    }
+  };
+}
+
+function buildNoahSummaryFromObserverLive(payload, statusByMarket = {}) {
+  const selectedMarket = normalizeNoahMarketKey(payload?.market || "combined");
+  const markets = payload?.markets && typeof payload.markets === "object" ? payload.markets : {};
+  const sessions = payload?.sessions && typeof payload.sessions === "object" ? payload.sessions : {};
+  const combinedPortfolio = payload?.portfolio || {};
+  const combinedTradeActivity = payload?.trade_activity || {};
+  const combinedTradeDay = String(
+    combinedTradeActivity.trade_day ||
+    combinedPortfolio.trade_day ||
+    payload?.trade_day ||
+    ""
+  ).trim();
+  const fallbackNextCycle = marketKey => {
+    const normalized = normalizeNoahMarketKey(marketKey);
+    if (normalized === "xetra") {
+      return nextBerlinWeekdayTime(9, 0);
+    }
+    if (normalized === "us") {
+      return nextBerlinWeekdayTime(15, 30);
+    }
+    if (normalized === "crypto") {
+      return new Date(Date.now() + 5 * 60_000).toISOString();
+    }
+    return null;
+  };
+  const rows = Object.keys(markets).map(key => {
+    const market = markets[key] || {};
+    const session = sessions[key] || {};
+    const status = statusByMarket[key] || {};
+    const runtimeMode = market.runtime_mode || {};
+    const tradeActivity = market.trade_activity || {};
+    const portfolio = market.portfolio || {};
+    const marketKey = market.market_registry?.market_key || key;
+    const normalizedKey = normalizeNoahMarketKey(marketKey);
+    const sessionOpen =
+      String(status.market_session_status || session.market_session_status || "").trim().toLowerCase() === "open" ||
+      Boolean(status.market_open ?? market.market_open);
+    const sessionStatus = String(status.market_session_status || session.market_session_status || "").trim().toLowerCase();
+    const statusTradeDay = String(status.trade_day || status.market_session?.trade_day || payload?.trade_day || "").trim();
+    const marketTradeDay = String(market.trade_day || tradeActivity.trade_day || portfolio.trade_day || "").trim();
+    const disabled =
+      Boolean(status.disabled || market.disabled || portfolio.disabled) ||
+      sessionStatus === "disabled" ||
+      String(status.runtime_mode?.runtime_mode || runtimeMode.runtime_mode || "").trim().toUpperCase() === "DISABLED";
+    const staleForStatusDay = Boolean(
+      (statusTradeDay && marketTradeDay && marketTradeDay !== statusTradeDay) ||
+      (combinedTradeDay && marketTradeDay && marketTradeDay !== combinedTradeDay)
+    );
+    const countForToday = !disabled && !staleForStatusDay;
+    const rawNextCycleAt =
+      status.next_regular_cycle_ts_et ||
+      status.next_cycle_ts_et ||
+      runtimeMode.next_regular_cycle_ts_et ||
+      session.next_cycle_ts_et ||
+      payload?.next_cycle_ts_et;
+    const cycleIntervalMinutes =
+      Number(
+        status.cycle_interval_minutes ||
+        runtimeMode.cycle_interval_minutes ||
+        runtimeMode?.morning_burst_plan?.guards?.regular_cycle_minutes ||
+        0
+      ) || 0;
+    const normalizedFutureCycle = normalizeFutureCycleTimestamp(rawNextCycleAt, cycleIntervalMinutes);
+    const nextCycleAt =
+      !countForToday
+        ? null
+        : normalizedFutureCycle || (isFutureTimestamp(rawNextCycleAt) ? rawNextCycleAt : fallbackNextCycle(marketKey));
+    const hasLiveCycle = isFutureTimestamp(nextCycleAt);
+    const modeCountsAsTrading = noahRuntimeModeCountsAsTrading(runtimeMode.runtime_mode || status.runtime_mode);
+    const trading =
+      countForToday &&
+      sessionOpen &&
+      (hasLiveCycle || modeCountsAsTrading);
+    const weeklyPnlEur = portfolioWeekPnlEur(portfolio);
+    return {
+      key: normalizedKey,
+      label: noahMarketLabel(marketKey),
+      product: noahProductLabel(marketKey),
+      trading,
+      nextCycleAt,
+      modeLabel: shortCycleMode(runtimeMode.execution_window_mode || runtimeMode.runtime_mode || session.session_state_raw || session.session_state),
+      openTrades: countForToday ? Number((tradeActivity.counts || tradeActivity).open_positions || 0) : 0,
+      closedTrades: countForToday ? Number((tradeActivity.counts || tradeActivity).closed_trades || 0) : 0,
+      dailyPnlEur: countForToday ? Number(portfolio.daily_pnl_eur || 0) : 0,
+      dailyPnlPct: countForToday ? Number(portfolio.daily_pnl_pct || 0) : 0,
+      weeklyPnlEur: countForToday ? weeklyPnlEur : 0,
+      weeklyPnlPct: countForToday ? portfolioWeekPnlPct(portfolio, weeklyPnlEur) : 0,
+      sessionOpen,
+      hasLiveCycle,
+      staleForStatusDay
+    };
+  });
+
+  const activeCycleRow =
+    rows.find(row => row.key === normalizeNoahMarketKey(payload?.active_market) && row.nextCycleAt) ||
+    rows.find(row => row.trading && row.nextCycleAt) ||
+    rows.find(row => row.nextCycleAt) ||
+    rows.find(row => row.key === normalizeNoahMarketKey(payload?.active_market)) ||
+    rows.find(row => row.trading) ||
+    rows[0] ||
+    null;
+
+  const combinedTradeCounts = payload?.trade_activity?.counts || payload?.trade_activity || {};
+  const weeklyEur = portfolioWeekPnlEur(combinedPortfolio) || rows.reduce((sum, row) => sum + row.weeklyPnlEur, 0);
+  const weeklyPct = portfolioWeekPnlPct(combinedPortfolio, weeklyEur) || rows.reduce((sum, row) => sum + row.weeklyPnlPct, 0);
+
+  return {
+    checked_at: payload?.generated_at_utc || nowIso(),
+    selected_market: selectedMarket,
+    selected_market_label: noahMarketLabel(selectedMarket),
+    cycle: activeCycleRow
+      ? {
+          market_label: activeCycleRow.label,
+          mode_label: activeCycleRow.modeLabel,
+          next_cycle_at: activeCycleRow.nextCycleAt,
+          trading: activeCycleRow.trading
+        }
+      : null,
+    pnl: {
+      daily_eur: rows.reduce((sum, row) => sum + row.dailyPnlEur, 0),
+      daily_pct: rows.reduce((sum, row) => sum + row.dailyPnlPct, 0),
+      weekly_eur: weeklyEur,
+      weekly_pct: weeklyPct
+    },
+    trades_today: {
+      open: Number(combinedTradeCounts.open_positions || rows.reduce((sum, row) => sum + row.openTrades, 0)),
+      closed: Number(combinedTradeCounts.closed_trades || rows.reduce((sum, row) => sum + row.closedTrades, 0))
+    },
+    live: {
+      configured_markets: Array.from(new Set(rows.map(row => row.label))),
+      configured_products: Array.from(new Set(rows.map(row => row.product))),
+      trading_markets: Array.from(new Set(rows.filter(row => row.trading).map(row => row.label))),
+      trading_products: Array.from(new Set(rows.filter(row => row.trading).map(row => row.product)))
+    }
+  };
+}
+
+function liveTileStatus(summary) {
+  if (summary?.error) {
+    return "error";
+  }
+  const tradingMarkets = Array.isArray(summary?.live?.trading_markets) ? summary.live.trading_markets : [];
+  if (tradingMarkets.length > 0) {
+    return "ok";
+  }
+  return "idle";
+}
+
+function projectionAgeMs(value, now = Date.now()) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : Number.POSITIVE_INFINITY;
+}
+
+function authorityIsPaperOnly(...records) {
+  return records.every(record => record?.paper_only === true && record?.live_trading_authority === false && record?.order_authority === "none");
+}
+
+function buildMlbEloV2Summary({ continuity, capture, paper }, now = Date.now()) {
+  if (!continuity || !capture || !paper) {
+    return makeNoahProbeFallback("MLB Elo v2 Status fehlt");
+  }
+  if (!authorityIsPaperOnly(continuity, capture, paper) || paper.research_only !== true) {
+    return makeNoahProbeFallback("MLB Elo v2 Authority blockiert");
+  }
+  const observedAt = continuity.observed_at_utc || paper.observed_at_utc || capture.observed_at_utc;
+  const fresh = projectionAgeMs(observedAt, now) <= 10 * 60_000;
+  const healthy = continuity.status === "ok" && continuity.operator_state === "running" &&
+    capture.circuit_open === false && paper.epoch_status === "active" && paper.ledger_integrity === "pass";
+  const settled = Math.max(0, Number(paper.settled_count || 0));
+  const realized = Number(paper.settled_paper_pnl_eur);
+  const windowPnl = settled === 0 ? 0 : Number.isFinite(realized) && paper.pnl_window === "current_week" ? realized : Number.NaN;
+  const startNav = Number(paper.starting_nav_eur || 0);
+  const windowPct = Number.isFinite(windowPnl) && startNav > 0 ? (windowPnl / startNav) * 100 : Number.NaN;
+  const warnings = {};
+  if (!fresh) warnings.freshness = "MLB Elo v2 Status ist veraltet";
+  if (!healthy) warnings.runtime = "MLB Elo v2 Runtime braucht Aufmerksamkeit";
+  if (settled > 0 && !Number.isFinite(windowPnl)) warnings.pnl_window = "MLB Tages-/Wochenfenster fehlt";
+  return {
+    checked_at: observedAt || nowIso(),
+    selected_market: "mlb_elo_v2",
+    selected_market_label: noahMarketLabel("mlb_elo_v2"),
+    market_closed: false,
+    cycle: {
+      market_label: "MLB V2",
+      mode_label: healthy ? "Running" : "Attention",
+      next_cycle_at: capture.next_wake_at_utc || null,
+      trading: healthy && fresh
+    },
+    pnl: { daily_eur: windowPnl, daily_pct: windowPct, weekly_eur: windowPnl, weekly_pct: windowPct, currency: "EUR" },
+    trades_today: { open: Number(paper.open_position_count || 0), closed: settled },
+    live: {
+      configured_markets: ["MLB V2"],
+      configured_products: ["SPORT"],
+      trading_markets: healthy && fresh ? ["MLB V2"] : [],
+      trading_products: healthy && fresh ? ["SPORT"] : []
+    },
+    warnings,
+    view_status: healthy && fresh ? "ok" : "warn",
+    view_status_label: healthy && fresh ? "RUNNING" : fresh ? "ATTENTION" : "STALE"
+  };
+}
+
+function buildMlbTeamFormV3Summary(status, now = Date.now()) {
+  if (!status || status.record_type !== "mlb_nextgen_team_form_paper_status_v2") {
+    return makeNoahProbeFallback("MLB Teamform Status fehlt");
+  }
+  const authoritySafe = status.paper_only === true && status.shadow_only === true &&
+    status.live_trading_authority === false && status.order_authority === "none" &&
+    status.wallet_authority === "none" && status.promotion_authority === "none";
+  if (!authoritySafe || status.official_booked_pnl_cents !== 0) {
+    return makeNoahProbeFallback("MLB Teamform Authority blockiert");
+  }
+
+  const observedAt = status.observed_at_utc;
+  const fresh = projectionAgeMs(observedAt, now) <= 10 * 60_000;
+  const ledgerHealthy = status.ledger_integrity === "pass";
+  const cacheHealthy = status.team_form_cache?.status === "healthy";
+  const settlementHealthy = status.settlement_freshness?.status === "healthy";
+  const healthy = fresh && ledgerHealthy && cacheHealthy && settlementHealthy;
+  const settled = Math.max(0, Number(status.settlement_count || 0));
+  const pnlCents = Number(status.settled_paper_pnl_cents);
+  const cumulativePnl = Number.isFinite(pnlCents) ? pnlCents / 100 : Number.NaN;
+  const warnings = {};
+  if (!fresh) warnings.freshness = "MLB Teamform Status ist veraltet";
+  if (!ledgerHealthy) warnings.ledger = "MLB Teamform Ledger blockiert";
+  if (!cacheHealthy) warnings.cache = "MLB Teamform Cache blockiert";
+  if (!settlementHealthy) warnings.settlement = "MLB Teamform Settlement blockiert";
+  if (!Number.isFinite(cumulativePnl)) warnings.pnl = "MLB Teamform Paper-PnL fehlt";
+
+  return {
+    checked_at: observedAt || nowIso(),
+    selected_market: "mlb_team_form_v3",
+    selected_market_label: noahMarketLabel("mlb_team_form_v3"),
+    market_closed: false,
+    cycle: {
+      market_label: "MLB FORM",
+      mode_label: healthy ? "Running" : "Attention",
+      next_cycle_at: null,
+      trading: healthy
+    },
+    pnl: {
+      daily_eur: Number.NaN,
+      daily_pct: Number.NaN,
+      weekly_eur: Number.NaN,
+      weekly_pct: Number.NaN,
+      cumulative_eur: cumulativePnl,
+      settlement_count: settled,
+      kind: "cumulative_paper",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: null },
+    live: {
+      configured_markets: ["MLB FORM"],
+      configured_products: ["PAPER"],
+      trading_markets: healthy ? ["MLB FORM"] : [],
+      trading_products: healthy ? ["PAPER"] : []
+    },
+    warnings,
+    view_status: healthy ? "ok" : "warn",
+    view_status_label: healthy ? "PAPER" : fresh ? "ATTENTION" : "STALE"
+  };
+}
+
+async function resolveMlbTeamFormV3Root() {
+  if (MLB_TEAM_FORM_V3_ROOT) {
+    return MLB_TEAM_FORM_V3_ROOT;
+  }
+  const template = '{{range .Mounts}}{{if eq .Destination "/lane"}}{{.Source}}{{end}}{{end}}';
+  const { stdout } = await execFileAsync("docker", ["inspect", "-f", template, MLB_TEAM_FORM_V3_CONTAINER], { timeout: 4_000 });
+  const root = String(stdout || "").trim();
+  if (!path.isAbsolute(root)) {
+    throw new Error("MLB Teamform Runtime-Root fehlt");
+  }
+  return root;
+}
+
+async function readJsonProjection(filePath) {
+  return JSON.parse(await readFile(filePath, "utf8"));
+}
+
+function asUsRuntimeView(summary) {
+  if (!summary || summary.error) {
+    return summary;
+  }
+  const running = liveTileStatus(summary) === "ok";
+  return {
+    ...summary,
+    selected_market: "us",
+    selected_market_label: "US RUNTIME",
+    view_status: running ? "ok" : "idle",
+    view_status_label: "PAPER RUNTIME"
+  };
+}
+
+function isMambaView(value) {
+  return Object.prototype.hasOwnProperty.call(MAMBA_VIEW_METADATA, value);
+}
+
+function mambaPnlAmount(window) {
+  if (!window || window.available !== true) {
+    return Number.NaN;
+  }
+  const value = Number(window.pnl_eur);
+  return Number.isFinite(value) ? value : Number.NaN;
+}
+
+function mambaTradeCount(window) {
+  if (!window || window.available !== true) {
+    return null;
+  }
+  const value = Number(window.trade_count);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function buildMambaWhatIfSummary(observerCard, marketView) {
+  const laneKey = "transfer52_to_95";
+  const lane = observerCard?.mamba_challengers?.[laneKey];
+  const metadata = MAMBA_VIEW_METADATA[marketView];
+  if (!lane || typeof lane !== "object") {
+    return makeNoahProbeFallback(`${metadata.label} What-if fehlt`);
+  }
+  if (lane.pnl_kind !== "what_if") {
+    return makeNoahProbeFallback(`${metadata.label} PnL-Kind blockiert`);
+  }
+
+  const raw = lane.raw && typeof lane.raw === "object" ? lane.raw : {};
+  const normalized = lane.normalized && typeof lane.normalized === "object" ? lane.normalized : {};
+  const rawDay = mambaPnlAmount(raw.day);
+  const rawWeek = mambaPnlAmount(raw.week);
+  const normalizedDay = mambaPnlAmount(normalized.day);
+  const normalizedWeek = mambaPnlAmount(normalized.week);
+  const comparisonStatus = String(lane.comparison_status || "unavailable").trim().toLowerCase();
+  const status = String(lane.status || "unavailable").trim().toLowerCase();
+  const warnings = {};
+  if (!Number.isFinite(rawDay)) warnings.raw_day = String(raw.day?.reason || "Tages-What-if nicht verfuegbar");
+  if (!Number.isFinite(rawWeek)) warnings.raw_week = String(raw.week?.reason || "Wochen-What-if nicht verfuegbar");
+  if (!Number.isFinite(normalizedDay) || !Number.isFinite(normalizedWeek)) {
+    warnings.normalized = String(normalized.day?.reason || normalized.week?.reason || "Normalisierter Vergleich nicht verfuegbar");
+  }
+  if (!['comparable', 'complete', 'ok'].includes(comparisonStatus)) {
+    warnings.comparison = String(lane.reason || `Vergleich: ${comparisonStatus || 'unavailable'}`);
+  }
+  const blocked = ['blocked', 'error', 'failed', 'invalid'].includes(status);
+  const available = Number.isFinite(rawDay) || Number.isFinite(rawWeek);
+  const viewStatus = blocked ? "error" : available ? (Object.keys(warnings).length ? "warn" : "ok") : "warn";
+
+  return {
+    checked_at: observerCard?.generated_at_utc || observerCard?.updated_at || nowIso(),
+    selected_market: marketView,
+    selected_market_label: metadata.label,
+    market_closed: false,
+    cycle: {
+      market_label: metadata.label,
+      mode_label: status.toUpperCase().slice(0, 12) || "WHAT-IF",
+      next_cycle_at: null,
+      trading: available && !blocked
+    },
+    pnl: {
+      daily_eur: rawDay,
+      weekly_eur: rawWeek,
+      daily_pct: Number.NaN,
+      weekly_pct: Number.NaN,
+      comparison_daily_eur: normalizedDay,
+      comparison_weekly_eur: normalizedWeek,
+      kind: "what_if",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: mambaTradeCount(raw.day) },
+    live: {
+      configured_markets: [metadata.label],
+      configured_products: ["WHAT-IF"],
+      trading_markets: available && !blocked ? [metadata.label] : [],
+      trading_products: available && !blocked ? ["WHAT-IF"] : []
+    },
+    lane: {
+      id: metadata.laneId,
+      model_variant: String(lane.model_variant || metadata.label),
+      comparison_status: comparisonStatus
+    },
+    warnings,
+    view_status: viewStatus,
+    view_status_label: "WHAT-IF"
+  };
+}
+
+function paperLaneWindow(lane, name) {
+  const windows = lane?.windows && typeof lane.windows === "object" ? lane.windows : {};
+  if (name === "day" && lane?.current_day && typeof lane.current_day === "object") {
+    return lane.current_day;
+  }
+  return windows[name] && typeof windows[name] === "object" ? windows[name] : {};
+}
+
+function paperLanePnl(window, fallback) {
+  if (window?.available === false) return Number.NaN;
+  const value = window?.pnl_eur ?? window?.booked_pnl_eur ?? fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function paperLaneTradeCount(window, lane) {
+  if (window?.available === false) return null;
+  const parsed = Number(window?.trade_count ?? lane?.trade_count ?? lane?.closed_trade_count);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function buildPaperLaneSummary(observerCard, marketView) {
+  const metadata = PAPER_LANE_VIEW_METADATA[marketView];
+  const promotionContract = observerCard?.lane_promotion_evidence
+    || (Array.isArray(observerCard?.promotion_evidence?.lanes) ? observerCard.promotion_evidence : null);
+  const promotionLanes = Array.isArray(promotionContract?.lanes) ? promotionContract.lanes : [];
+  const promotionLane = promotionLanes.find(item => item && typeof item === "object" && (item.role || item.current_role) === metadata?.role);
+  const contract = observerCard?.paper_lane_contract;
+  const lanes = Array.isArray(observerCard?.paper_lanes)
+    ? observerCard.paper_lanes
+    : Array.isArray(observerCard?.lanes?.paper_lanes) ? observerCard.lanes.paper_lanes : [];
+  const promotionContractSafe = promotionContract?.contract_version === "noah.us.lane-promotion-evidence.v2"
+    && promotionContract.available === true
+    && promotionContract.state === "available"
+    && promotionContract.paper_only === true
+    && promotionContract.target_valid_sessions === 40
+    && promotionContract.fallback_used === false;
+  const paperContractSafe = contract?.contract_version === "noah.us.ibkr-paper-lanes.v2"
+    && contract.independent_books === true
+    && contract.combined_pnl_claim === false;
+  if (!metadata || (!promotionContractSafe && !paperContractSafe)) {
+    return makeNoahProbeFallback(`${metadata?.label || "Paper-Lane"} Contract fehlt`);
+  }
+  const legacyLane = lanes.find(item => item && typeof item === "object" && (item.role || item.current_role) === metadata.role);
+  const lane = promotionContractSafe ? (promotionLane ? {
+    ...promotionLane,
+    role: promotionLane.current_role,
+    state: promotionLane.current_day?.state,
+    booked: promotionLane.current_day?.available === true,
+    what_if_only: false,
+    execution_source: "ibkr_paper",
+    live_trading_authority: false,
+    combined_portfolio_claim: false,
+    current_day: {
+      ...promotionLane.current_day,
+      pnl_eur: promotionLane.current_day?.actual_pnl_eur
+    },
+    promotion_evidence: promotionLane.promotion_progress
+  } : null) : legacyLane;
+  if (!lane) return makeNoahProbeFallback(`${metadata.label} Paper-Lane fehlt`);
+
+  const authoritySafe = (promotionLane ? promotionLane.paper_only === true && promotionLane.pnl_basis === "actual_broker_paper" : lane.paper_only === true)
+    && lane.what_if_only !== true
+    && lane.execution_source === "ibkr_paper"
+    && lane.live_trading_authority === false
+    && lane.combined_portfolio_claim !== true;
+  if (!authoritySafe) return makeNoahProbeFallback(`${metadata.label} Authority blockiert`);
+
+  const day = paperLaneWindow(lane, "day");
+  const week = paperLaneWindow(lane, "week");
+  const state = String(day.state || lane.state || lane.status || "unavailable").trim().toLowerCase();
+  const dayAvailable = lane.booked === true && (day.available === true || ["booked", "no_trades"].includes(state));
+  const weeklyAvailable = week.available === true;
+  const dailyPnl = dayAvailable ? paperLanePnl(day, lane.booked_pnl_eur ?? lane.daily_pnl_eur) : Number.NaN;
+  const weeklyPnl = weeklyAvailable ? paperLanePnl(week) : Number.NaN;
+  const promotion = lane.promotion_evidence && typeof lane.promotion_evidence === "object"
+    ? lane.promotion_evidence
+    : observerCard?.promotion_evidence?.[lane.lane_id] || {};
+  const promotionState = String(promotion.state || promotion.status || "not_assessed").trim().toLowerCase();
+  const promotionGateUnsafe = promotion.promotion_allowed === true;
+  const blocked = ["blocked", "error", "failed", "invalid", "unavailable"].includes(state) || promotionGateUnsafe;
+  const available = Number.isFinite(dailyPnl) || Number.isFinite(weeklyPnl);
+  const warnings = {};
+  if (!Number.isFinite(dailyPnl)) warnings.day = String(day.reason || lane.reason || "Tages-Paper-PnL nicht verfuegbar");
+  if (!Number.isFinite(weeklyPnl)) warnings.week = String(week.reason || "Wochen-Paper-PnL nicht verfuegbar");
+  if (promotionState !== "eligible") warnings.promotion = String((promotion.blockers || [])[0] || `Promotion: ${promotionState}`);
+  if (promotionGateUnsafe) warnings.promotion_authority = "Promotion-Freigabe ist auf der Read-only-Kachel unzulaessig";
+
+  return {
+    checked_at: observerCard?.generated_at_utc || observerCard?.updated_at || nowIso(),
+    selected_market: marketView,
+    selected_market_label: String(lane.label || metadata.label),
+    market_closed: false,
+    cycle: {
+      market_label: metadata.label,
+      mode_label: metadata.roleLabel,
+      next_cycle_at: null,
+      trading: available && !blocked
+    },
+    pnl: {
+      daily_eur: dailyPnl,
+      weekly_eur: weeklyPnl,
+      daily_pct: Number.NaN,
+      weekly_pct: Number.NaN,
+      kind: "paper_lane",
+      currency: "EUR"
+    },
+    trades_today: { open: null, closed: paperLaneTradeCount(day, lane) },
+    live: {
+      configured_markets: [metadata.label],
+      configured_products: ["IBKR PAPER"],
+      trading_markets: available && !blocked ? [metadata.label] : [],
+      trading_products: available && !blocked ? ["IBKR PAPER"] : []
+    },
+    lane: {
+      id: lane.lane_id,
+      book_id: lane.book_id || lane.track?.book_id,
+      strategy_lineage_id: lane.strategy_lineage_id,
+      role: metadata.role,
+      state,
+      promotion_state: promotionState,
+      promotion_allowed: false,
+      promotion_tracks: lane.tracks
+    },
+    warnings,
+    view_status: blocked ? "error" : available ? (Object.keys(warnings).length ? "warn" : "ok") : "warn",
+    view_status_label: `${metadata.roleLabel} · ${state.toUpperCase()}`.slice(0, 18)
+  };
+}
+
+async function probeNoahMonitor(selectedMarket = "combined") {
+  const marketView = normalizeNoahViewMarket(selectedMarket);
+  if (marketView === "mlb_elo_v2") {
+    const [continuity, capture, paper] = await Promise.all([
+      readJsonProjection(path.join(MLB_ELO_V2_ROOT, "runtime/continuity-status.json")).catch(() => null),
+      readJsonProjection(path.join(MLB_ELO_V2_ROOT, "capture/status.json")).catch(() => null),
+      readJsonProjection(path.join(MLB_ELO_V2_ROOT, "paper/status.json")).catch(() => null)
+    ]);
+    return buildMlbEloV2Summary({ continuity, capture, paper });
+  }
+  if (marketView === "mlb_team_form_v3") {
+    const root = await resolveMlbTeamFormV3Root().catch(() => null);
+    const status = root ? await readJsonProjection(path.join(root, "status.json")).catch(() => null) : null;
+    return buildMlbTeamFormV3Summary(status);
+  }
   try {
-    return await runSshJson(NOAH_MONITOR_DEFAULTS.host, NOAH_MONITOR_DEFAULTS.command, 45_000);
+    const baseUrl = getNoahMonitorBaseUrl();
+    if (!baseUrl) {
+      return makeNoahProbeFallback("Noah API Basis-URL fehlt");
+    }
+    const timeoutMs = parseOptionalNumber(process.env.CODEX_MONITOR_NOAH_MONITOR_TIMEOUT_MS, 90_000);
+    if (PAPER_LANE_VIEW_METADATA[marketView]) {
+      const observerCard = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
+        { timeoutMs }
+      );
+      return buildPaperLaneSummary(observerCard, marketView);
+    }
+    if (isMambaView(marketView)) {
+      const observerCard = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
+        { timeoutMs }
+      );
+      return buildMambaWhatIfSummary(observerCard, marketView);
+    }
+    const headers = buildAgentRemoteHeaders("CODEX_MONITOR_NOAH");
+    try {
+      const streamdeckTiles = await fetchJson(
+        createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", marketView),
+        { headers, timeoutMs }
+      );
+      const summary = buildNoahSummaryFromStreamdeckTiles(streamdeckTiles);
+      if (summary.live?.configured_markets?.length) {
+        return asUsRuntimeView(summary);
+      }
+    } catch {
+      // Fall back to the broader view contracts below.
+    }
+    try {
+      const [statusCard, observerCard] = await Promise.all([
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/status-card", marketView), { headers, timeoutMs }),
+        fetchJson(createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", marketView), { headers, timeoutMs })
+      ]);
+      const summary = buildNoahSummary(statusCard, observerCard);
+      if (summary.live?.configured_markets?.length) {
+        return asUsRuntimeView(summary);
+      }
+    } catch {
+      // Fall back to the legacy observer/live path below.
+    }
+    const observerLive = await fetchJson(
+      createNoahMonitorUrl(baseUrl, "/api/v1/observer/live", marketView),
+      { headers, timeoutMs }
+    );
+    const marketKeys = Object.keys(observerLive?.markets || {});
+    const statusEntries = await Promise.all(
+      marketKeys.map(async marketKey => {
+        try {
+          const status = await fetchJson(
+            createNoahMonitorUrl(baseUrl, "/api/v1/status/current", marketKey),
+            { headers, timeoutMs }
+          );
+          return [marketKey, status];
+        } catch {
+          return [marketKey, null];
+        }
+      })
+    );
+    const summary = buildNoahSummaryFromObserverLive(observerLive, Object.fromEntries(statusEntries));
+    if (!summary.live?.configured_markets?.length) {
+      return makeNoahProbeFallback("Noah API lieferte keine Markt-Daten");
+    }
+    return asUsRuntimeView(summary);
   } catch (error) {
     return makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
   }
 }
 
 async function getCachedNoahMonitor() {
-  if (noahMonitorCache.result && Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS) {
+  const view = await readNoahMarketView();
+  if (
+    noahMonitorCache.result &&
+    noahMonitorCache.market === view.market &&
+    Date.now() - noahMonitorCache.cachedAt <= NOAH_MONITOR_TTL_MS
+  ) {
     return noahMonitorCache.result;
   }
 
-  if (noahMonitorInflight) {
+  if (noahMonitorInflight && noahMonitorInflight.market === view.market) {
     return noahMonitorInflight;
   }
 
-  noahMonitorInflight = probeNoahMonitor()
+  const inflight = probeNoahMonitor(view.market)
     .then(result => {
-      const usableResult =
-        result?.error && noahMonitorCache.lastGoodResult
-          ? buildStaleNoahSummary(noahMonitorCache.lastGoodResult, result.error)
-          : result;
-      noahMonitorCache.cachedAt = Date.now();
-      noahMonitorCache.result = usableResult;
-      if (hasUsableNoahSummary(usableResult)) {
-        noahMonitorCache.lastGoodResult = usableResult;
+      if (noahMonitorInflight === inflight) {
+        noahMonitorCache.cachedAt = Date.now();
+        noahMonitorCache.market = view.market;
+        noahMonitorCache.result = result;
+        noahMonitorInflight = null;
       }
-      noahMonitorInflight = null;
-      return usableResult;
+      return result;
     })
     .catch(error => {
-      const fallback = noahMonitorCache.lastGoodResult
-        ? buildStaleNoahSummary(noahMonitorCache.lastGoodResult, error instanceof Error ? error.message : String(error))
-        : makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
-      noahMonitorCache.cachedAt = Date.now();
-      noahMonitorCache.result = fallback;
-      noahMonitorInflight = null;
+      const fallback = makeNoahProbeFallback(error instanceof Error ? error.message : String(error));
+      if (noahMonitorInflight === inflight) {
+        noahMonitorCache.cachedAt = Date.now();
+        noahMonitorCache.market = view.market;
+        noahMonitorCache.result = fallback;
+        noahMonitorInflight = null;
+      }
       return fallback;
     });
+  noahMonitorInflight = inflight;
+  noahMonitorInflight.market = view.market;
 
   return noahMonitorInflight;
 }
@@ -1681,46 +3102,53 @@ function getImmediateNoahMonitor() {
 }
 
 function buildNoahTiles(summary) {
-  const now = new Date();
   const updatedAt = summary?.checked_at || nowIso();
+  const degraded = Boolean(summary?.stale_reason || Object.keys(summary?.warnings || {}).length);
   if (summary?.error) {
-    const xetraStartAt = nextBerlinWeekdayTime(9, 0, now);
-    const usStartAt = nextBerlinWeekdayTime(15, 30, now);
     const fallbackTiles = {
-      xetra_status: {
-        key: "xetra_status",
-        label: "Xetra",
-        status: "idle",
-        line1: `Start ${formatBerlinTime(xetraStartAt)}`,
-        line2: formatCountdown(xetraStartAt),
-        footer: "Warte auf Daten",
+      cycle: {
+        key: "cycle",
+        label: "Noah Zyklus",
+        status: "error",
+        line1: "Keine Daten",
+        line2: "--:--",
+        footer: "Bridge Noah",
         updatedAt
       },
-      xetra_cycle: {
-        key: "xetra_cycle",
-        label: "Xetra Zyklus",
-        status: "idle",
-        line1: `Start ${formatBerlinTime(xetraStartAt)}`,
-        line2: formatCountdown(xetraStartAt),
-        footer: "Warte auf Daten",
+      weekly_pnl: {
+        key: "weekly_pnl",
+        label: "Wochen PnL",
+        status: "error",
+        line1: "Keine Daten",
+        line2: "--%",
+        footer: "Woche",
         updatedAt
       },
-      us_status: {
-        key: "us_status",
-        label: "US Handel",
-        status: "idle",
-        line1: `Start ${formatBerlinTime(usStartAt)}`,
-        line2: formatCountdown(usStartAt),
-        footer: "Warte auf Daten",
+      daily_pnl: {
+        key: "daily_pnl",
+        label: "Tages PnL",
+        status: "error",
+        line1: "Keine Daten",
+        line2: "--%",
+        footer: "24h",
         updatedAt
       },
-      us_cycle: {
-        key: "us_cycle",
-        label: "US Zyklus",
-        status: "idle",
-        line1: `Start ${formatBerlinTime(usStartAt)}`,
-        line2: formatCountdown(usStartAt),
-        footer: "Warte auf Daten",
+      trades_today: {
+        key: "trades_today",
+        label: "Trades Heute",
+        status: "error",
+        line1: "Open -",
+        line2: "Close -",
+        footer: "Heute",
+        updatedAt
+      },
+      live_markets: {
+        key: "live_markets",
+        label: "Live Markt",
+        status: "error",
+        line1: "-",
+        line2: blankTileLine(),
+        footer: blankTileLine(),
         updatedAt
       }
     };
@@ -1730,172 +3158,93 @@ function buildNoahTiles(summary) {
     }));
   }
 
-  const xetra = summary?.xetra || {};
-  const us = summary?.us || {};
-  const monitorDegraded = Boolean(summary?.stale_reason || Object.keys(summary?.warnings || {}).length);
-  const tileStatus = status => (status === "error" ? "error" : monitorDegraded ? "warn" : status);
-  const xetraState = String(xetra.state || "not_started").toLowerCase();
-  const xetraCounter = readCounterSnapshot("xetra", xetra.counter, now.getTime());
-  const xetraOpenPositions = xetraCounter.open;
-  const xetraClosedPositions = xetraCounter.closed;
-  const xetraStartAt = xetra.scheduled_start_at || nextBerlinWeekdayTime(9, 0, now);
-  const xetraCycleToday = isSameTradeDayInZone(xetra.latest_cycle_at, "Europe/Berlin", now);
-  const xetraTradeDayToday = normalizeTradeDay(xetra.trade_day) === formatDateInZone(now, "Europe/Berlin");
-  const xetraSessionDayActive = isXetraSessionDayActive(xetra.session_window);
-  const xetraSession = String(xetra.session_state || "").toUpperCase();
-  const xetraWithinTradingWindow = isBerlinXetraTradingWindow(now);
-  const xetraTradingActive =
-    xetraWithinTradingWindow &&
-    (Boolean(xetra.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY", "OPEN"].includes(xetraSession));
-  const xetraActivitySeen = xetraOpenPositions > 0 || xetraClosedPositions > 0;
-  const xetraDayActive = xetraSessionDayActive || xetraTradeDayToday || xetraCycleToday || xetraActivitySeen;
-  const xetraRunning = xetraState === "running" || xetraTradingActive;
-  const xetraIntervalSec = Number(xetra.cycle_interval_sec || 300);
-  const xetraDerivedLastCycleAt =
-    xetra.latest_cycle_at
-      ? xetra.latest_cycle_at
-      : xetra.next_cycle_at
-        ? new Date(new Date(xetra.next_cycle_at).getTime() - xetraIntervalSec * 1000).toISOString()
-        : null;
-  const xetraScheduledStartMs = Date.parse(String(xetraStartAt || ""));
-  const xetraScheduledStartKnown = !Number.isNaN(xetraScheduledStartMs);
-  const xetraPreOpen =
-    !xetraRunning &&
-    !xetraDayActive &&
-    ["not_started", "planned"].includes(xetraState) &&
-    xetraTradeDayToday &&
-    (!xetraScheduledStartKnown || xetraScheduledStartMs > now.getTime());
-  const xetraAwaitingLive = !xetraRunning && !xetraDayActive && !xetraPreOpen;
-  const xetraPostClose = !xetraWithinTradingWindow && xetraTradeDayToday && !xetraPreOpen;
-  const xetraStatus =
-    xetraRunning
-      ? "ok"
-      : xetraPostClose
-        ? "idle"
-      : xetraPreOpen
-        ? "idle"
-      : ["planned", "starting", "stopping"].includes(xetraState)
-        ? "warn"
-        : ["failed", "error"].includes(xetraState)
-          ? "error"
-          : xetraDayActive
-            ? "warn"
-            : "idle";
-  const usSession = String(us.session_state || "offline").toUpperCase();
-  const usCounter = readCounterSnapshot("us", us.counter, now.getTime());
-  const usOpenPositions = usCounter.open;
-  const usClosedPositions = usCounter.closed;
-  const usTradingActive = Boolean(us.market_open) || ["TRADEABLE", "DEFENSIVE", "CLOSE_ONLY"].includes(usSession);
-  const usStartAt = us.next_market_open_berlin || nextBerlinWeekdayTime(15, 30, now);
-  const usCycleToday = isSameTradeDayInZone(us.last_cycle_at, "America/New_York", now);
-  const usTradeDayToday = normalizeTradeDay(us.trade_day) === formatDateInZone(now, "America/New_York");
-  const usPreOpen = !usTradingActive && !usCycleToday && !usTradeDayToday;
-  const usStatus =
-    usTradingActive
-      ? "ok"
-      : usPreOpen
-        ? "idle"
-      : us.health === "INTERVENTION_REQUIRED"
-        ? "error"
-        : "warn";
-
-  const xetraStatusFooter =
-    xetraRunning
-      ? "Laeuft"
-      : xetraPostClose
-        ? "Geschlossen"
-      : xetraPreOpen
-        ? `Start ${formatBerlinTime(xetraStartAt)}`
-      : xetraAwaitingLive
-        ? "Warte auf Live-Signal"
-      : ["planned", "starting", "stopping"].includes(xetraState)
-        ? "Handelstag aktiv"
-        : xetra.latest_cycle_at
-          ? "Geschlossen"
-          : xetraDayActive
-            ? "Handelstag aktiv"
-            : "Nicht aktiv";
-
-  const xetraCycleFooter =
-    xetraRunning
-      ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Laeuft")
-      : xetraPostClose
-        ? "Geschlossen"
-      : xetraPreOpen
-        ? `Start ${formatBerlinTime(xetraStartAt)}`
-      : xetraAwaitingLive
-        ? "Warte auf Live-Signal"
-      : xetra.latest_cycle_at
-        ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`
-        : xetraDayActive
-          ? "Handelstag aktiv"
-          : xetra.session_window || "Nicht aktiv";
-
-  const usStatusFooter = usTradingActive ? formatUsSessionLabel(us.session_state, Boolean(us.market_open)) : `Start ${formatBerlinTime(usStartAt)}`;
-  const usCycleFooter = usTradingActive ? formatCountdown(us.next_cycle_at) : `Start ${formatBerlinTime(usStartAt)}`;
-  const xetraCounterLine1 = xetraOpenPositions === null ? "Open -" : `Open ${xetraOpenPositions}`;
-  const xetraCounterLine2 = xetraClosedPositions === null ? "Closed -" : `Closed ${xetraClosedPositions}`;
-  const usCounterLine1 = usOpenPositions === null ? "Open -" : `Open ${usOpenPositions}`;
-  const usCounterLine2 = usClosedPositions === null ? "Closed -" : `Closed ${usClosedPositions}`;
-  const xetraCounterFooterHint = xetraCounter.stale ? ` | stale ${xetraCounter.source}` : "";
-  const usCounterFooterHint = usCounter.stale ? ` | stale ${usCounter.source}` : "";
+  const cycle = summary?.cycle || {};
+  const pnl = summary?.pnl || {};
+  const trades = summary?.trades_today || {};
+  const live = summary?.live || {};
+  const nonTradingDay = isNoahNonTradingDay(summary);
+  const cycleEtaSeconds = finiteNumber(cycle.next_cycle_eta_seconds, NaN);
+  const cycleEtaTarget = Number.isFinite(cycleEtaSeconds) ? new Date(Date.now() + Math.max(0, cycleEtaSeconds) * 1000).toISOString() : null;
+  const cycleTimerTarget = isFutureTimestamp(cycle.next_cycle_at) ? cycle.next_cycle_at : cycleEtaTarget;
+  const cycleHasTimer = Boolean(cycleTimerTarget);
+  const cycleStatus = cycle.trading ? (cycleHasTimer ? "ok" : "warn") : degraded ? "warn" : "idle";
+  const liveMarkets = compactCodes(live.trading_markets || live.markets);
+  const hasActiveMarket = liveTileStatus(summary) === "ok";
+  const liveProducts = compactCodes(live.trading_products || live.products, blankTileLine());
+  const configuredMarkets = compactCodes(live.configured_markets, "-");
+  const selectedMarket = summary?.selected_market || "combined";
+  const selectedMarketLabel = summary?.selected_market_label || noahMarketLabel(summary?.selected_market || "combined");
+  const closedLiveFooter = selectedMarket === "combined" ? configuredMarkets : selectedMarketLabel || configuredMarkets;
+  const pnlCurrency = String(pnl.currency || "EUR").toUpperCase() === "USD" ? "USD" : "EUR";
+  const isWhatIfPnl = pnl.kind === "what_if";
+  const isPaperLanePnl = pnl.kind === "paper_lane";
+  const isCumulativePaperPnl = pnl.kind === "cumulative_paper";
+  const promotionTracks = summary?.lane?.promotion_tracks || {};
+  const allPaperTrack = promotionTracks.all_valid_paper_strategy_track || {};
+  const brokerTrack = promotionTracks.broker_actual_track || {};
+  const promotionCounter = Number.isInteger(allPaperTrack.valid_day_count) && Number.isInteger(allPaperTrack.target_valid_sessions)
+    ? `${allPaperTrack.valid_day_count}/${allPaperTrack.target_valid_sessions}` : null;
+  const brokerCounter = Number.isInteger(brokerTrack.valid_day_count) && Number.isInteger(brokerTrack.target_valid_sessions)
+    ? `${brokerTrack.valid_day_count}/${brokerTrack.target_valid_sessions}` : null;
+  const promotionStateLabel = String(summary?.lane?.promotion_state || "not_assessed").toUpperCase();
+  const whatIfPnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
+  const whatIfComparisonLine = value => `NORM ${whatIfPnlLine(value)}`;
+  const whatIfPnlStatus = value => {
+    if (viewStatus === "error") return "error";
+    if (!Number.isFinite(Number(value))) return "warn";
+    return pnlStatus(value, degraded, hasActiveMarket);
+  };
+  const paperLanePnlLine = value => Number.isFinite(Number(value)) ? formatSignedEuro(value, pnlCurrency) : "n/a";
+  const paperLanePnlStatus = value => {
+    if (viewStatus === "error") return "error";
+    return Number.isFinite(Number(value)) ? (viewStatus || "ok") : "warn";
+  };
+  const viewStatus = ["idle", "ok", "warn", "error"].includes(summary?.view_status) ? summary.view_status : null;
 
   const tiles = {
-    xetra_status: {
-      key: "xetra_status",
-      label: "Xetra",
-      status: tileStatus(xetraStatus),
-      line1: xetraCounterLine1,
-      line2: xetraCounterLine2,
-      footer: `${xetraStatusFooter}${xetraCounterFooterHint}`,
+    cycle: {
+      key: "cycle",
+      label: "Noah Zyklus",
+      status: isCumulativePaperPnl || isPaperLanePnl ? (viewStatus || "warn") : cycleStatus,
+      line1: isCumulativePaperPnl ? "PAPER" : isPaperLanePnl ? String(summary.lane?.role === "primary" ? "PRIMARY" : "CHALLENGER") : cycleHasTimer ? formatCountdown(cycleTimerTarget) : "--:--",
+      line2: isCumulativePaperPnl ? String(summary.view_status_label || "").slice(0, 18) : isPaperLanePnl ? `${promotionStateLabel}${brokerCounter ? ` · ${brokerCounter}` : ""}`.slice(0, 18) : blankTileLine(),
+      footer: isCumulativePaperPnl ? "TEAMFORM" : isPaperLanePnl ? "LANE ROLE" : cycleHasTimer ? "Naechste" : blankTileLine(),
       updatedAt
     },
-    xetra_cycle: {
-      key: "xetra_cycle",
-      label: "Xetra Zyklus",
-      status: tileStatus(xetraStatus),
-      line1: xetraRunning
-        ? (xetraDerivedLastCycleAt ? `Letz ${formatBerlinTime(xetraDerivedLastCycleAt)}` : "Live")
-        : xetraPostClose
-          ? "Session Ende"
-        : xetraPreOpen
-          ? `Start ${formatBerlinTime(xetraStartAt)}`
-          : xetraAwaitingLive
-            ? "Live unklar"
-            : xetra.latest_cycle_at
-              ? `Letz ${formatBerlinTime(xetra.latest_cycle_at)}`
-              : "Kein Zyklus",
-      line2:
-        xetraRunning
-          ? (xetra.next_cycle_at ? formatCountdown(xetra.next_cycle_at) : "Warte Tick")
-          : xetraPostClose
-            ? "--:--"
-          : xetraPreOpen
-            ? formatCountdown(xetraStartAt)
-          : xetraAwaitingLive
-            ? "Warte Signal"
-          : ["planned", "starting", "stopping"].includes(xetraState)
-            ? "Warte auf Zyklus"
-            : "Kein Timer",
-      footer: xetraRunning ? "Naechster" : xetraCycleFooter,
+    weekly_pnl: {
+      key: "weekly_pnl",
+      label: isCumulativePaperPnl ? "Paper PnL" : "Wochen PnL",
+      status: isCumulativePaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : isPaperLanePnl ? `${promotionCounter || "n/a"} · ${promotionStateLabel}`.slice(0, 18) : formatSignedPercent(pnl.weekly_pct),
+      footer: isCumulativePaperPnl ? "PAPER TOTAL" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Woche",
       updatedAt
     },
-    us_status: {
-      key: "us_status",
-      label: "US Handel",
-      status: tileStatus(usStatus),
-      line1: usCounterLine1,
-      line2: usCounterLine2,
-      footer: `${usStatusFooter}${usCounterFooterHint}`,
+    daily_pnl: {
+      key: "daily_pnl",
+      label: "Tages PnL",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : isPaperLanePnl ? String(summary.lane?.role || "paper").toUpperCase().slice(0, 18) : formatSignedPercent(pnl.daily_pct),
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "ECHTER PAPER-PNL" : nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
-    us_cycle: {
-      key: "us_cycle",
-      label: "US Zyklus",
-      status: tileStatus(usTradingActive ? usStatus : "idle"),
-      line1: usPreOpen ? `Start ${formatBerlinTime(usStartAt)}` : us.last_cycle_at ? `Letz ${formatBerlinTime(us.last_cycle_at)}` : "Kein Zyklus",
-      line2: usTradingActive ? formatCountdown(us.next_cycle_at) : formatCountdown(usStartAt),
-      footer: usTradingActive ? "Naechster" : "Start",
+    trades_today: {
+      key: "trades_today",
+      label: isCumulativePaperPnl ? "Paper Trades" : "Trades Heute",
+      status: isCumulativePaperPnl ? "idle" : isWhatIfPnl || isPaperLanePnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
+      line1: isCumulativePaperPnl ? "n/a" : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      footer: isCumulativePaperPnl ? "PAPER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Heute",
+      updatedAt
+    },
+    live_markets: {
+      key: "live_markets",
+      label: "Live Markt",
+      status: viewStatus || (degraded && liveTileStatus(summary) !== "ok" ? "warn" : liveTileStatus(summary)),
+      line1: viewStatus ? selectedMarketLabel : liveMarkets,
+      line2: viewStatus ? String(summary.view_status_label || liveProducts).slice(0, 18) : liveProducts,
+      footer: viewStatus ? `View ${selectedMarketLabel}` : liveMarkets === "-" ? closedLiveFooter : `View ${selectedMarketLabel}`,
       updatedAt
     }
   };
@@ -1905,6 +3254,20 @@ function buildNoahTiles(summary) {
     ...(tiles[key] || {})
   }));
 }
+
+export {
+  buildMlbEloV2Summary,
+  buildMlbTeamFormV3Summary,
+  buildMambaWhatIfSummary,
+  buildPaperLaneSummary,
+  buildNoahSummary,
+  buildNoahSummaryFromObserverLive,
+  buildNoahSummaryFromStreamdeckTiles,
+  buildNoahTiles,
+  normalizeNoahViewMarket,
+  portfolioWeekPnlEur,
+  portfolioWeekPnlPct
+};
 
 async function updateSlot(slotNumber, patch) {
   const slots = await readSlots();
@@ -2230,7 +3593,7 @@ async function serve() {
   await ensureDataFile();
   const uiTick = setInterval(() => {
     void broadcastStateStream().catch(() => {});
-  }, 1_000);
+  }, STATE_STREAM_BROADCAST_MS);
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
@@ -2263,6 +3626,45 @@ async function serve() {
 
       if (req.method === "GET" && url.pathname === "/threads") {
         sendJson(res, 200, await loadExplicitThreads());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/noah/market") {
+        sendJson(res, 200, await readNoahMarketView());
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market/next") {
+        const view = await cycleNoahMarketView();
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/noah/market") {
+        let view;
+        try {
+          const body = await parseBody(req);
+          if (!NOAH_VIEW_MARKET_ORDER.includes(String(body.market || "").trim().toLowerCase())) {
+            throw new Error(`Noah market view must be one of: ${NOAH_VIEW_MARKET_ORDER.join(", ")}`);
+          }
+          view = await writeNoahMarketView(body.market);
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+          return;
+        }
+        noahMonitorCache.cachedAt = 0;
+        noahMonitorCache.result = null;
+        noahMonitorInflight = null;
+        void broadcastStateStream().catch(() => {});
+        sendJson(res, 200, {
+          ...view,
+          order: NOAH_VIEW_MARKET_ORDER,
+          label: noahMarketLabel(view.market)
+        });
         return;
       }
 
@@ -2532,7 +3934,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

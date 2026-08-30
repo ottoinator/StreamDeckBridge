@@ -1,6 +1,8 @@
 node_modules/
+.qa/
 _refs/
 *.log
 *.tmp
 dist/
 .DS_Store
+bridge.runtime.json
