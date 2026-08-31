@@ -3,10 +3,12 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 
 import {
+  buildBrokerPaperLaneSummary,
   buildMlbEloV2Summary,
   buildMlbTeamFormV3Summary,
   buildMambaWhatIfSummary,
   buildPaperLaneSummary,
+  buildNoahSummaryFromStreamdeckTiles,
   buildNoahTiles,
   normalizeNoahViewMarket
 } from "../bridge/monitor-bridge.mjs";
@@ -150,6 +152,79 @@ test("Paper lane parser blocks unsafe authority and never falls back to What-if"
   const ownerGate = buildPaperLaneSummary({ lane_promotion_evidence: promotion }, "paper_primary");
   assert.equal(ownerGate.view_status, "error");
   assert.equal(ownerGate.lane.promotion_allowed, false);
+});
+
+test("Native95 Stream Deck view uses broker fills and pending accounting truth", () => {
+  const summary = buildBrokerPaperLaneSummary({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-08-31T14:33:00Z",
+    paper_lanes: {
+      contract: "noah_us_ibkr_paper_lanes_operator_projection_v1",
+      generated_at_utc: "2026-08-31T14:33:00Z",
+      lanes: [{
+        key: "native95",
+        lane_id: "noah_us_native95_fixed60_ibkr_paper_v2",
+        paper_only: true,
+        freshness: { status: "fresh" },
+        accounting: { status: "pending_commission", booked_pnl_eur: null },
+        outcome_counts: { filled: 1, pending: 1, rejected: 0 },
+        trades: [{ execution_status: "exit_filled", accounting_status: "pending_commission", symbol: "AMD" }]
+      }]
+    }
+  });
+  const tiles = buildNoahTiles(summary);
+  assert.equal(summary.pnl.kind, "broker_paper");
+  assert.equal(tiles.find(tile => tile.key === "cycle").line2, "EXIT FILLED");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line2, "PENDING COMMISSION");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Fill 1");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Pending 1");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "warn");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "EXIT FILLED");
+});
+
+test("default Noah tiles surface ORB broker rejections after the market closes", () => {
+  const summary = buildNoahSummaryFromStreamdeckTiles({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-08-31T20:05:00Z",
+    market: "us",
+    cycle: { trading: false },
+    pnl: { daily_eur: 0, daily_pct: 0, weekly_eur: 0, weekly_pct: 0, paper_daily_eur: null, paper_status: "pending" },
+    trades_today: { open: 0, closed: 0, paper_filled: 1, paper_pending: 1, paper_rejected: 4 },
+    live: { configured_markets: ["US"], trading_markets: [], configured_products: ["EQ"], trading_products: [] },
+    markets: {},
+    paper_lanes: { contract: "noah_us_ibkr_paper_lanes_operator_projection_v1", lanes: [] }
+  });
+  const tradeTile = buildNoahTiles(summary).find(tile => tile.key === "trades_today");
+  assert.equal(tradeTile.line1, "Fill 1");
+  assert.equal(tradeTile.line2, "Reject 4");
+  assert.equal(tradeTile.status, "error");
+});
+
+test("ORB13 view shows broker rejections without fabricated PnL", () => {
+  const summary = buildBrokerPaperLaneSummary({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-08-31T14:33:00Z",
+    paper_lanes: {
+      contract: "noah_us_ibkr_paper_lanes_operator_projection_v1",
+      generated_at_utc: "2026-08-31T14:33:00Z",
+      lanes: [{
+        key: "orb13",
+        lane_id: "noah_us_orb13_ibkr_paper_v2",
+        paper_only: true,
+        freshness: { status: "fresh" },
+        accounting: { status: "no_trades", booked_pnl_eur: null },
+        outcome_counts: { filled: 0, pending: 0, rejected: 4 },
+        trades: [{ execution_status: "broker_rejected", accounting_status: "rejected", symbol: "CRWD" }]
+      }]
+    }
+  }, "paper_challenger");
+  const tiles = buildNoahTiles(summary);
+  assert.equal(summary.selected_market, "paper_challenger");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "Fill 0");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line2, "Reject 4");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").status, "error");
 });
 
 test("bridge no longer reads a Companion token from SSH or systemd", async () => {
