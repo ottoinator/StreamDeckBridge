@@ -227,6 +227,96 @@ test("ORB13 view shows broker rejections without fabricated PnL", () => {
   assert.equal(tiles.find(tile => tile.key === "trades_today").status, "error");
 });
 
+test("ORB13 fresh no-trades outcome is a valid terminal Stream Deck state", () => {
+  const summary = buildBrokerPaperLaneSummary({
+    contract_version: "streamdeck_tiles_v1",
+    generated_at_utc: "2026-09-04T14:42:36Z",
+    paper_lanes: {
+      contract: "noah_us_ibkr_paper_lanes_operator_projection_v1",
+      generated_at_utc: "2026-09-04T14:42:36Z",
+      lanes: [{
+        key: "orb13",
+        lane_id: "noah_us_orb13_ibkr_paper_v2",
+        paper_only: true,
+        freshness: { status: "fresh" },
+        accounting: { status: "no_trades", booked_pnl_eur: null },
+        outcome_counts: { attempted: 0, booked: 0, filled: 0, no_fill: 0, pending: 0, rejected: 0 },
+        trades: []
+      }]
+    }
+  }, "paper_challenger");
+  const tiles = buildNoahTiles(summary);
+  assert.equal(summary.selected_market, "paper_challenger");
+  assert.equal(summary.lane.execution_status, "no_trades");
+  assert.equal(summary.view_status, "ok");
+  assert.deepEqual(summary.warnings, {});
+  assert.equal(tiles.find(tile => tile.key === "cycle").line2, "NO TRADES");
+  assert.equal(tiles.find(tile => tile.key === "cycle").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line1, "n/a");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").line2, "NO TRADES");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").line1, "NO TRADES");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").line2, "NO TRADES");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").status, "ok");
+});
+
+test("ORB13 empty trades without explicit no-trades accounting remains unavailable", () => {
+  const summary = buildBrokerPaperLaneSummary({
+    contract_version: "streamdeck_tiles_v1",
+    paper_lanes: {
+      contract: "noah_us_ibkr_paper_lanes_operator_projection_v1",
+      lanes: [{
+        key: "orb13",
+        lane_id: "noah_us_orb13_ibkr_paper_v2",
+        paper_only: true,
+        freshness: { status: "fresh" },
+        accounting: { status: "unavailable", booked_pnl_eur: null },
+        outcome_counts: { filled: 0, pending: 0, rejected: 0 },
+        trades: []
+      }]
+    }
+  }, "paper_challenger");
+  assert.equal(summary.lane.execution_status, "unavailable");
+  assert.equal(summary.view_status, "warn");
+  assert.match(summary.warnings.accounting, /unavailable/);
+});
+
+test("ORB13 malformed or nonzero no-trades evidence fails closed", () => {
+  const baseLane = {
+    key: "orb13",
+    lane_id: "noah_us_orb13_ibkr_paper_v2",
+    paper_only: true,
+    freshness: { status: "fresh" },
+    accounting: { status: "no_trades", booked_pnl_eur: null },
+    outcome_counts: { attempted: 0, booked: 0, filled: 0, no_fill: 0, pending: 0, rejected: 0 },
+    trades: []
+  };
+  const invalidLanes = [
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, attempted: 1 } },
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, booked: 1 } },
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, no_fill: 1 } },
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, attempted: null } },
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, booked: "0" } },
+    { ...baseLane, outcome_counts: { ...baseLane.outcome_counts, no_fill: false } },
+    { ...baseLane, freshness: { status: "stale" } },
+    { ...baseLane, trades: {} },
+    { ...baseLane, outcome_counts: null }
+  ];
+  for (const lane of invalidLanes) {
+    const summary = buildBrokerPaperLaneSummary({
+      contract_version: "streamdeck_tiles_v1",
+      paper_lanes: {
+        contract: "noah_us_ibkr_paper_lanes_operator_projection_v1",
+        lanes: [lane]
+      }
+    }, "paper_challenger");
+    assert.equal(summary.lane.execution_status, "unavailable");
+    assert.equal(summary.view_status, "warn");
+    assert.ok(summary.warnings.accounting || summary.warnings.freshness);
+  }
+});
+
 test("bridge no longer reads a Companion token from SSH or systemd", async () => {
   const bridgeSource = await readFile(new URL("../bridge/monitor-bridge.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(bridgeSource, /systemctl['"],\s*['"]cat/);
