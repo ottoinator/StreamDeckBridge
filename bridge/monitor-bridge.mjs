@@ -2991,21 +2991,34 @@ function buildBrokerPaperLaneSummary(streamdeckTiles, marketView = "paper_primar
   }
   const freshness = String(lane.freshness?.status || "unavailable").toLowerCase();
   const accountingStatus = String(lane.accounting?.status || "unavailable").toLowerCase();
-  const counts = lane.outcome_counts || {};
-  const trades = Array.isArray(lane.trades) ? lane.trades : [];
+  const outcomeKeys = ["attempted", "booked", "filled", "no_fill", "pending", "rejected"];
+  const countsValid = lane.outcome_counts && typeof lane.outcome_counts === "object" && !Array.isArray(lane.outcome_counts);
+  const counts = countsValid ? lane.outcome_counts : {};
+  const tradesValid = Array.isArray(lane.trades);
+  const trades = tradesValid ? lane.trades : [];
   const latest = trades[0] || {};
-  const executionStatus = String(latest.execution_status || (Number(counts.rejected || 0) > 0 ? "broker_rejected" : "unavailable")).toLowerCase();
   const rejected = Number(counts.rejected || 0);
   const pending = Number(counts.pending || 0);
   const filled = Number(counts.filled || 0);
+  const explicitNoTrades = freshness === "fresh"
+    && accountingStatus === "no_trades"
+    && tradesValid
+    && trades.length === 0
+    && countsValid
+    && outcomeKeys.every(key => typeof counts[key] === "number" && Number.isFinite(counts[key]) && counts[key] === 0);
+  const executionStatus = String(
+    latest.execution_status
+    || (rejected > 0 ? "broker_rejected" : explicitNoTrades ? "no_trades" : "unavailable")
+  ).toLowerCase();
   const bookedPnl = accountingStatus === "booked" && freshness === "fresh"
     ? finiteNumber(lane.accounting?.booked_pnl_eur, Number.NaN)
     : Number.NaN;
+  const accountingTerminal = accountingStatus === "booked" || explicitNoTrades;
   const warnings = {};
   if (freshness !== "fresh") warnings.freshness = `Broker-Snapshot ${freshness}`;
   if (rejected > 0) warnings.execution = `${rejected} Broker-Ablehnung${rejected === 1 ? "" : "en"}`;
-  if (pending > 0 || accountingStatus !== "booked") warnings.accounting = `Abrechnung ${accountingStatus}`;
-  const viewStatus = rejected > 0 ? "error" : freshness !== "fresh" || pending > 0 || accountingStatus !== "booked" ? "warn" : "ok";
+  if (pending > 0 || !accountingTerminal) warnings.accounting = `Abrechnung ${accountingStatus}`;
+  const viewStatus = rejected > 0 ? "error" : freshness !== "fresh" || pending > 0 || !accountingTerminal ? "warn" : "ok";
   const statusLabel = executionStatus === "exit_filled"
     ? "EXIT FILLED"
     : executionStatus === "broker_rejected"
@@ -3309,6 +3322,11 @@ function buildNoahTiles(summary) {
   const paperPending = Number(isBrokerPaperPnl ? trades.open ?? 0 : trades.paper_pending ?? 0);
   const paperRejected = Number(isBrokerPaperPnl ? trades.rejected ?? 0 : trades.paper_rejected ?? 0);
   const hasPaperOutcomes = isBrokerPaperPnl || paperFilled > 0 || paperPending > 0 || paperRejected > 0;
+  const brokerNoTrades = isBrokerPaperPnl
+    && summary?.lane?.execution_status === "no_trades"
+    && paperFilled === 0
+    && paperPending === 0
+    && paperRejected === 0;
   const accountingLabel = String(pnl.accounting_status || "unavailable").toUpperCase().replaceAll("_", " ").slice(0, 18);
 
   const tiles = {
@@ -3343,8 +3361,8 @@ function buildNoahTiles(summary) {
       key: "trades_today",
       label: isCumulativePaperPnl ? "Paper Trades" : "Trades Heute",
       status: isCumulativePaperPnl ? "idle" : hasPaperOutcomes ? (paperRejected > 0 ? "error" : paperPending > 0 ? "warn" : "ok") : isWhatIfPnl || isPaperLanePnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
-      line1: isCumulativePaperPnl ? "n/a" : hasPaperOutcomes ? `Fill ${paperFilled}` : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
-      line2: isCumulativePaperPnl ? "KEIN FENSTER" : hasPaperOutcomes ? (paperRejected > 0 ? `Reject ${paperRejected}` : `Pending ${paperPending}`) : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      line1: isCumulativePaperPnl ? "n/a" : brokerNoTrades ? "NO TRADES" : hasPaperOutcomes ? `Fill ${paperFilled}` : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : brokerNoTrades ? blankTileLine() : hasPaperOutcomes ? (paperRejected > 0 ? `Reject ${paperRejected}` : `Pending ${paperPending}`) : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
       footer: isCumulativePaperPnl ? "PAPER" : hasPaperOutcomes ? "BROKER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Heute",
       updatedAt
     },
