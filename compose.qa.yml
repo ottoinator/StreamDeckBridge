@@ -1,5 +1,6 @@
 services:
   qa:
+    network_mode: none
     build:
       context: .
       dockerfile: Dockerfile.qa

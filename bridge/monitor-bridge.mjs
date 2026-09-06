@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -2989,6 +2990,24 @@ function buildBrokerPaperLaneSummary(streamdeckTiles, marketView = "paper_primar
   if (!lane || lane.paper_only !== true) {
     return makeNoahProbeFallback(`${metadata.label} Broker-Paper Lane fehlt`);
   }
+  let digestVerified = false;
+  try {
+    const canonical = lane.readmodel_validation?.canonical_json;
+    const { source_digest, ...core } = lane.readmodel || {};
+    digestVerified = typeof canonical === "string"
+      && createHash("sha256").update(canonical).digest("hex") === source_digest
+      && isDeepStrictEqual(JSON.parse(canonical), core);
+  } catch { /* malformed broker contract remains unavailable */ }
+  const model = digestVerified && lane.readmodel_validation?.status === "valid"
+    && lane.readmodel?.contract === "noah_us_broker_session_readmodel_v1"
+    && lane.readmodel?.lane_id === lane.lane_id && lane.readmodel?.role === lane.role
+    && lane.readmodel?.paper_only === true && lane.readmodel?.live_trading_authority === false
+    && /^[a-f0-9]{64}$/.test(lane.readmodel?.source_digest || "") ? lane.readmodel : null;
+  if ((lane.readmodel || lane.readmodel_validation) && !model) return makeNoahProbeFallback("Broker-Readmodel ungültig");
+  const closedStatus = model?.session?.phase === "closed";
+  const day = model?.day;
+  const week = model?.week;
+  const accountingNumber = row => row?.available === true && typeof row.pnl_eur === "number" && Number.isFinite(row.pnl_eur) ? row.pnl_eur : Number.NaN;
   const freshness = String(lane.freshness?.status || "unavailable").toLowerCase();
   const accountingStatus = String(lane.accounting?.status || "unavailable").toLowerCase();
   const outcomeKeys = ["attempted", "booked", "filled", "no_fill", "pending", "rejected"];
@@ -3010,7 +3029,7 @@ function buildBrokerPaperLaneSummary(streamdeckTiles, marketView = "paper_primar
     latest.execution_status
     || (rejected > 0 ? "broker_rejected" : explicitNoTrades ? "no_trades" : "unavailable")
   ).toLowerCase();
-  const bookedPnl = accountingStatus === "booked" && freshness === "fresh"
+  const bookedPnl = model ? accountingNumber(day) : accountingStatus === "booked" && freshness === "fresh"
     ? finiteNumber(lane.accounting?.booked_pnl_eur, Number.NaN)
     : Number.NaN;
   const accountingTerminal = accountingStatus === "booked" || explicitNoTrades;
@@ -3018,8 +3037,9 @@ function buildBrokerPaperLaneSummary(streamdeckTiles, marketView = "paper_primar
   if (freshness !== "fresh") warnings.freshness = `Broker-Snapshot ${freshness}`;
   if (rejected > 0) warnings.execution = `${rejected} Broker-Ablehnung${rejected === 1 ? "" : "en"}`;
   if (pending > 0 || !accountingTerminal) warnings.accounting = `Abrechnung ${accountingStatus}`;
-  const viewStatus = rejected > 0 ? "error" : freshness !== "fresh" || pending > 0 || !accountingTerminal ? "warn" : "ok";
-  const statusLabel = executionStatus === "exit_filled"
+  if (week?.status === "partial") warnings.weekly = `Wochenbelege ${week.accounting_receipt_days.length}/${week.expected_trade_days.length}`;
+  const viewStatus = rejected > 0 ? "error" : freshness !== "fresh" || pending > 0 || (!closedStatus && !accountingTerminal) || week?.status === "partial" ? "warn" : "ok";
+  const statusLabel = closedStatus ? "GESCHLOSSEN" : model?.session?.phase === "preopen" ? "VOR HANDELSSTART" : executionStatus === "exit_filled"
     ? "EXIT FILLED"
     : executionStatus === "broker_rejected"
       ? "REJECTED"
@@ -3029,33 +3049,40 @@ function buildBrokerPaperLaneSummary(streamdeckTiles, marketView = "paper_primar
     checked_at: projection.generated_at_utc || streamdeckTiles.generated_at_utc || nowIso(),
     selected_market: marketView,
     selected_market_label: metadata.label,
-    market_closed: false,
+    market_closed: model?.session?.market_closed === true,
     cycle: {
       market_label: metadata.label,
       mode_label: statusLabel,
       next_cycle_at: null,
-      trading: freshness === "fresh"
+      trading: freshness === "fresh" && model?.session?.phase === "open"
     },
     pnl: {
       daily_eur: bookedPnl,
-      weekly_eur: Number.NaN,
+      weekly_eur: model ? accountingNumber(week) : Number.NaN,
       daily_pct: Number.NaN,
       weekly_pct: Number.NaN,
       kind: "broker_paper",
-      accounting_status: accountingStatus,
+      accounting_status: model ? day?.status : accountingStatus,
+      as_of_trade_day: day?.as_of_trade_day,
+      weekly_status: week?.status || "unavailable",
+      weekly_partial: week?.status === "partial",
+      weekly_receipt_days: week?.accounting_receipt_days?.length,
+      weekly_expected_days: week?.expected_trade_days?.length,
+      source_digest: model?.source_digest,
       currency: "EUR"
     },
-    trades_today: { open: pending, closed: filled, rejected },
+    trades_today: { open: closedStatus ? null : pending, closed: closedStatus ? null : filled, rejected: closedStatus ? null : rejected },
     live: {
       configured_markets: [metadata.label],
       configured_products: ["PAPER"],
-      trading_markets: freshness === "fresh" ? [metadata.label] : [],
-      trading_products: freshness === "fresh" ? ["PAPER"] : []
+      trading_markets: freshness === "fresh" && model?.session?.phase === "open" ? [metadata.label] : [],
+      trading_products: freshness === "fresh" && model?.session?.phase === "open" ? ["PAPER"] : []
     },
     lane: {
       id: lane.lane_id,
       key: lane.key,
-      execution_status: executionStatus,
+      execution_status: closedStatus ? "closed" : executionStatus,
+      closed_status: closedStatus,
       accounting_status: accountingStatus,
       freshness
     },
@@ -3091,15 +3118,7 @@ async function probeNoahMonitor(selectedMarket = "combined") {
         createNoahMonitorUrl(baseUrl, "/api/v1/view/streamdeck-tiles", "us"),
         { headers: buildAgentRemoteHeaders("CODEX_MONITOR_NOAH"), timeoutMs }
       );
-      const liveSummary = buildBrokerPaperLaneSummary(streamdeckTiles, marketView);
-      if (!liveSummary.error) {
-        return liveSummary;
-      }
-      const observerCard = await fetchJson(
-        createNoahMonitorUrl(baseUrl, "/api/v1/view/observer-card", "us"),
-        { timeoutMs }
-      );
-      return buildPaperLaneSummary(observerCard, marketView);
+      return buildBrokerPaperLaneSummary(streamdeckTiles, marketView);
     }
     if (isMambaView(marketView)) {
       const observerCard = await fetchJson(
@@ -3343,8 +3362,8 @@ function buildNoahTiles(summary) {
       key: "weekly_pnl",
       label: isCumulativePaperPnl ? "Paper PnL" : "Wochen PnL",
       status: isCumulativePaperPnl || isBrokerPaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.weekly_eur) : pnlStatus(pnl.weekly_eur, degraded, hasActiveMarket),
-      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isBrokerPaperPnl ? "n/a" : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
-      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isBrokerPaperPnl ? "NUR TAGESRECEIPT" : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : isPaperLanePnl ? `${promotionCounter || "n/a"} · ${promotionStateLabel}`.slice(0, 18) : formatSignedPercent(pnl.weekly_pct),
+      line1: isCumulativePaperPnl ? formatSignedEuro(pnl.cumulative_eur, pnlCurrency) : isBrokerPaperPnl ? whatIfPnlLine(pnl.weekly_eur) : isWhatIfPnl ? whatIfPnlLine(pnl.weekly_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.weekly_eur) : formatSignedEuro(pnl.weekly_eur, pnlCurrency),
+      line2: isCumulativePaperPnl ? `${Number(pnl.settlement_count || 0)} SETTLED` : isBrokerPaperPnl ? (pnl.weekly_status === "complete" ? "VOLLSTÄNDIG" : pnl.weekly_partial ? `TEIL ${pnl.weekly_receipt_days}/${pnl.weekly_expected_days}` : "NICHT VERFÜGBAR") : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_weekly_eur) : isPaperLanePnl ? `${promotionCounter || "n/a"} · ${promotionStateLabel}`.slice(0, 18) : formatSignedPercent(pnl.weekly_pct),
       footer: isCumulativePaperPnl ? "PAPER TOTAL" : isBrokerPaperPnl ? "BROKER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Woche",
       updatedAt
     },
@@ -3354,15 +3373,15 @@ function buildNoahTiles(summary) {
       status: isCumulativePaperPnl ? "idle" : isBrokerPaperPnl ? (viewStatus || "warn") : isWhatIfPnl ? whatIfPnlStatus(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlStatus(pnl.daily_eur) : pnlStatus(pnl.daily_eur, degraded, hasActiveMarket),
       line1: isCumulativePaperPnl ? "n/a" : isBrokerPaperPnl ? whatIfPnlLine(pnl.daily_eur) : isWhatIfPnl ? whatIfPnlLine(pnl.daily_eur) : isPaperLanePnl ? paperLanePnlLine(pnl.daily_eur) : formatSignedEuro(pnl.daily_eur, pnlCurrency),
       line2: isCumulativePaperPnl ? "KEIN FENSTER" : isBrokerPaperPnl ? accountingLabel : isWhatIfPnl ? whatIfComparisonLine(pnl.comparison_daily_eur) : isPaperLanePnl ? String(summary.lane?.role || "paper").toUpperCase().slice(0, 18) : formatSignedPercent(pnl.daily_pct),
-      footer: isCumulativePaperPnl ? "PAPER" : isBrokerPaperPnl ? "BROKER-RECEIPT" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "ECHTER PAPER-PNL" : nonTradingDay ? "Tag" : "24h",
+      footer: isCumulativePaperPnl ? "PAPER" : isBrokerPaperPnl ? (pnl.as_of_trade_day || "BROKER-RECEIPT") : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "ECHTER PAPER-PNL" : nonTradingDay ? "Tag" : "24h",
       updatedAt
     },
     trades_today: {
       key: "trades_today",
       label: isCumulativePaperPnl ? "Paper Trades" : "Trades Heute",
       status: isCumulativePaperPnl ? "idle" : hasPaperOutcomes ? (paperRejected > 0 ? "error" : paperPending > 0 ? "warn" : "ok") : isWhatIfPnl || isPaperLanePnl ? (trades.closed != null && Number.isFinite(Number(trades.closed)) ? "ok" : "warn") : nonTradingDay ? "idle" : degraded ? "warn" : "ok",
-      line1: isCumulativePaperPnl ? "n/a" : brokerNoTrades ? "NO TRADES" : hasPaperOutcomes ? `Fill ${paperFilled}` : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
-      line2: isCumulativePaperPnl ? "KEIN FENSTER" : brokerNoTrades ? blankTileLine() : hasPaperOutcomes ? (paperRejected > 0 ? `Reject ${paperRejected}` : `Pending ${paperPending}`) : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
+      line1: isCumulativePaperPnl ? "n/a" : isBrokerPaperPnl && summary.lane?.closed_status ? "Geschlossen" : brokerNoTrades ? "NO TRADES" : hasPaperOutcomes ? `Fill ${paperFilled}` : isWhatIfPnl || isPaperLanePnl ? `Open ${trades.open != null && Number.isFinite(Number(trades.open)) ? Number(trades.open) : "n/a"}` : nonTradingDay ? "Geschlossen" : `Open ${Number(trades.open || 0)}`,
+      line2: isCumulativePaperPnl ? "KEIN FENSTER" : isBrokerPaperPnl && summary.lane?.closed_status ? blankTileLine() : brokerNoTrades ? blankTileLine() : hasPaperOutcomes ? (paperRejected > 0 ? `Reject ${paperRejected}` : `Pending ${paperPending}`) : isWhatIfPnl || isPaperLanePnl ? `Close ${trades.closed != null && Number.isFinite(Number(trades.closed)) ? Number(trades.closed) : "n/a"}` : nonTradingDay ? blankTileLine() : `Close ${Number(trades.closed || 0)}`,
       footer: isCumulativePaperPnl ? "PAPER" : hasPaperOutcomes ? "BROKER" : isWhatIfPnl ? "WHAT-IF" : isPaperLanePnl ? "IBKR PAPER" : "Heute",
       updatedAt
     },
