@@ -135,6 +135,25 @@ test("Noah streamdeck tile contract drives PnL, trades, cycle, and live markets 
   assert.equal(tiles.find(tile => tile.key === "live_markets").footer, "View COMB");
 });
 
+test("Noah 7 tiles preserve UUID slots and separate lifecycle from negative PnL", () => {
+  const observed = "2026-09-09T13:30:00Z";
+  const tiles = buildNoahTiles({
+    checked_at: observed,
+    noah7_tiles: [
+      { tile_id: "session", title: "Session", lifecycle: "open", freshness: "fresh", severity: "info", lines: ["OPEN", "Next 09:32"], footer: "2026-09-09", observed_at: observed },
+      { tile_id: "native95", title: "Native95", lifecycle: "done", freshness: "fresh", severity: "info", lines: ["BOOKED", "PnL -95 EUR"], footer: "fresh", observed_at: observed },
+      { tile_id: "orb13", title: "ORB13", lifecycle: "preopen_ready", freshness: "fresh", severity: "info", lines: ["READY", "PnL unbooked"], footer: "fresh", observed_at: observed },
+      { tile_id: "broker", title: "Broker", lifecycle: "reconciled", freshness: "fresh", severity: "info", lines: ["RECONCILED", "0 open"], footer: "fresh", observed_at: observed },
+      { tile_id: "evidence_trixie", title: "Evidence/Trixie", lifecycle: "blocked", freshness: "unknown", severity: "warning", lines: ["BLOCKED", "Day not sealed"], footer: "unknown", observed_at: observed }
+    ]
+  });
+  assert.deepEqual(tiles.map(tile => tile.key), ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"]);
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").label, "Native95");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "weekly_pnl").status, "warn");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").label, "Broker");
+});
+
 test("Noah live-market tile reflects selected single-market view without changing trading truth", () => {
   const summary = buildNoahSummaryFromStreamdeckTiles({
     contract_version: "streamdeck_tiles_v1",

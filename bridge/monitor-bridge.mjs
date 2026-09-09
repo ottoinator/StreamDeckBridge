@@ -54,6 +54,7 @@ const PAPER_LANE_VIEW_METADATA = {
 const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
+const DEFAULT_NOAH7_BASE_URL = "https://noah-us-cx33.tail8bcdce.ts.net/noah7/";
 const MLB_ELO_V2_ROOT = process.env.CODEX_MONITOR_MLB_ELO_V2_ROOT || path.resolve(
   process.cwd(),
   "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v2"
@@ -3108,6 +3109,19 @@ async function probeNoahMonitor(selectedMarket = "combined") {
     return buildMlbTeamFormV3Summary(status);
   }
   try {
+    const noah7BaseUrl = process.env.CODEX_MONITOR_NOAH7_BASE_URL || DEFAULT_NOAH7_BASE_URL;
+    try {
+      const payload = await fetchJson(new URL("api/streamdeck", noah7BaseUrl).toString(), { timeoutMs: 8_000 });
+      const tiles = Array.isArray(payload?.tiles) ? payload.tiles : [];
+      const ids = new Set(tiles.map(tile => tile?.tile_id));
+      if (payload?.contract !== "noah7.streamdeck.v1" || payload?.schema_version !== 1 || tiles.length !== 5
+          || ids.size !== 5 || tiles.some(tile => tile?.read_only !== true)) {
+        throw new Error("Noah 7 Stream-Deck-Vertrag ungültig");
+      }
+      return { checked_at: tiles[0]?.observed_at || nowIso(), noah7_tiles: tiles, warnings: {} };
+    } catch {
+      // Preserve the proven legacy observer as a fail-safe during cutover.
+    }
     const baseUrl = getNoahMonitorBaseUrl();
     if (!baseUrl) {
       return makeNoahProbeFallback("Noah API Basis-URL fehlt");
@@ -3238,6 +3252,37 @@ function getImmediateNoahMonitor() {
 }
 
 function buildNoahTiles(summary) {
+  if (Array.isArray(summary?.noah7_tiles)) {
+    const keyById = {
+      session: "cycle",
+      evidence_trixie: "weekly_pnl",
+      native95: "daily_pnl",
+      orb13: "trades_today",
+      broker: "live_markets"
+    };
+    const statusFor = tile => {
+      const lifecycle = String(tile?.lifecycle || "").toLowerCase();
+      const severity = String(tile?.severity || "").toLowerCase();
+      const freshness = String(tile?.freshness || "").toLowerCase();
+      if (["error", "failed"].includes(lifecycle) || severity === "critical") return "error";
+      if (freshness !== "fresh" || ["blocked", "needs_input"].includes(lifecycle) || severity === "warning") return "warn";
+      return "ok";
+    };
+    const byKey = Object.fromEntries(summary.noah7_tiles.map(tile => {
+      const key = keyById[tile.tile_id];
+      if (!key) return ["", null];
+      return [key, {
+        key,
+        label: String(tile.title || tile.tile_id).slice(0, 18),
+        status: statusFor(tile),
+        line1: String(tile.lines?.[0] || tile.lifecycle || "-").slice(0, 18),
+        line2: String(tile.lines?.[1] || tile.reason_code || "-").slice(0, 18),
+        footer: String(tile.footer || tile.freshness || "-").slice(0, 18),
+        updatedAt: tile.observed_at || summary.checked_at || nowIso()
+      }];
+    }).filter(([key, tile]) => key && tile));
+    return NOAH_TILE_ORDER.map(key => ({ ...createDefaultNoahTile(key), ...(byKey[key] || {}) }));
+  }
   const updatedAt = summary?.checked_at || nowIso();
   const degraded = Boolean(summary?.stale_reason || Object.keys(summary?.warnings || {}).length);
   if (summary?.error) {

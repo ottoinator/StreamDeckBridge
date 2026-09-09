@@ -49,16 +49,9 @@ export const BRIDGE_URL = process.env.CODEX_MONITOR_URL || "http://127.0.0.1:456
 export const POLL_INTERVAL_MS = 1_000;
 
 export async function cycleNoahMarketView(): Promise<void> {
-  const response = await fetch(new URL("/noah/market/next", BRIDGE_URL).toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: "{}"
-  });
-  if (!response.ok) {
-    throw new Error(`Noah market view cycle failed: HTTP ${response.status}`);
-  }
+  // Noah 7 tiles are deliberately read-only; key presses cannot mutate views
+  // or runtime state. Keep the exported hook for the stable action UUID.
+  return;
 }
 
 const SLOT_STATUS_META: Record<SlotStatus, { title: string; color: string; dot: string }> = {
@@ -112,11 +105,11 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
 
 export function defaultNoahTile(key: NoahTileKey): NoahTileState {
   const labels: Record<NoahTileKey, string> = {
-    cycle: "Noah Zyklus",
-    weekly_pnl: "Wochen PnL",
-    daily_pnl: "Tages PnL",
-    trades_today: "Trades Heute",
-    live_markets: "Live Markt"
+    cycle: "Session",
+    weekly_pnl: "Evidence/Trixie",
+    daily_pnl: "Native95",
+    trades_today: "ORB13",
+    live_markets: "Broker"
   };
   return {
     key,
