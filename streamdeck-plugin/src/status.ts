@@ -37,6 +37,7 @@ export type NoahTileState = {
   line2: string;
   footer: string;
   updatedAt: string;
+  valueEur?: number | null;
 };
 
 export type MonitorState = {
@@ -105,11 +106,11 @@ export function defaultAgent(name: AgentState["name"]): AgentState {
 
 export function defaultNoahTile(key: NoahTileKey): NoahTileState {
   const labels: Record<NoahTileKey, string> = {
-    cycle: "Session",
-    weekly_pnl: "Evidence/Trixie",
-    daily_pnl: "Native95",
-    trades_today: "ORB13",
-    live_markets: "Broker"
+    cycle: "NOAH 7",
+    daily_pnl: "N95 Heute",
+    trades_today: "ORB13 Heute",
+    weekly_pnl: "N95 Woche",
+    live_markets: "ORB13 Woche"
   };
   return {
     key,
@@ -118,7 +119,8 @@ export function defaultNoahTile(key: NoahTileKey): NoahTileState {
     line1: "Keine Daten",
     line2: "Warte auf Bridge",
     footer: "--:--",
-    updatedAt: new Date(0).toISOString()
+    updatedAt: new Date(0).toISOString(),
+    valueEur: null
   };
 }
 
@@ -225,7 +227,8 @@ export function normalizeState(payload: unknown): MonitorState {
         line1: String(tile.line1 || item.line1),
         line2: String(tile.line2 || item.line2),
         footer: String(tile.footer || item.footer),
-        status: (["idle", "ok", "warn", "error"].includes(String(tile.status)) ? tile.status : item.status) as NoahTileStatus
+        status: (["idle", "ok", "warn", "error"].includes(String(tile.status)) ? tile.status : item.status) as NoahTileStatus,
+        valueEur: typeof tile.valueEur === "number" ? tile.valueEur : null
       };
     })
   };
@@ -398,19 +401,25 @@ export function agentSvg(agent: AgentState): string {
 
 export function noahTileSvg(tile: NoahTileState): string {
   const meta = NOAH_TILE_META[tile.status];
-  const titleLines = wrapText(tile.label, 12, 2);
-  const line1 = wrapText(tile.line1 || meta.title, 11, 1);
+  const titleLines = wrapText(tile.label, 11, 1);
+  const line1 = wrapText(tile.line1 || meta.title, 9, 1);
   const line2 = wrapText(tile.line2 || "", 11, 1);
   const footerLines = wrapText(tile.footer || meta.title, 12, 1);
+  const line1Color = typeof tile.valueEur === "number"
+    ? (tile.valueEur >= 0 ? "#86efac" : "#fca5a5")
+    : "#ffffff";
 
   const titleSvg = titleLines
-    .map((line, index) => `<text x="8" y="${13 + index * 9}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
+    .map((line, index) => `<text x="8" y="${13 + index * 9}" font-size="9" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
-  const detailSvg = [line1[0] || "", line2[0] || ""]
-    .map((line, index) => `<text x="8" y="${35 + index * 14}" font-size="12" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
-    .join("");
+  const line1Svg = (line1[0] || "")
+    ? `<text x="6" y="38" font-size="14" font-weight="700" fill="${line1Color}">${escapeXml(line1[0])}</text>`
+    : "";
+  const line2Svg = (line2[0] || "")
+    ? `<text x="8" y="52" font-size="11" font-weight="700" fill="#ffffff">${escapeXml(line2[0])}</text>`
+    : "";
   const footerSvg = footerLines
-    .map((line, index) => `<text x="8" y="${63 - index * 8}" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
+    .map(line => `<text x="8" y="65" font-size="8" font-weight="700" fill="#ffffff">${escapeXml(line)}</text>`)
     .join("");
 
   return svgDataUrl(`
@@ -419,7 +428,8 @@ export function noahTileSvg(tile: NoahTileState): string {
       <rect x="4" y="4" width="64" height="64" rx="11" fill="rgba(255,255,255,0.07)" />
       <circle cx="58" cy="14" r="6" fill="${meta.dot}" />
       ${titleSvg}
-      ${detailSvg}
+      ${line1Svg}
+      ${line2Svg}
       ${footerSvg}
     </svg>
   `);

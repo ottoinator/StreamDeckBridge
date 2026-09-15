@@ -55,6 +55,22 @@ const STATE_STREAM_HEARTBEAT_MS = 15_000;
 const STATE_STREAM_BROADCAST_MS = Number(process.env.CODEX_MONITOR_STATE_BROADCAST_MS || 5_000);
 const DEFAULT_NOAH_MONITOR_BASE_URL = "http://100.98.171.9:8765";
 const DEFAULT_NOAH7_BASE_URL = "https://noah-us-cx33.tail8bcdce.ts.net/noah7/";
+const NOAH7_V2_TILE_IDS = ["health", "native95_day", "orb13_day", "native95_week", "orb13_week"];
+const NOAH7_V1_KEY_BY_ID = {
+  session: "cycle",
+  evidence_trixie: "weekly_pnl",
+  native95: "daily_pnl",
+  orb13: "trades_today",
+  broker: "live_markets"
+};
+const NOAH7_V2_KEY_BY_ID = {
+  health: "cycle",
+  native95_day: "daily_pnl",
+  orb13_day: "trades_today",
+  native95_week: "weekly_pnl",
+  orb13_week: "live_markets"
+};
+let lastNoah7Tiles = null;
 const MLB_ELO_V2_ROOT = process.env.CODEX_MONITOR_MLB_ELO_V2_ROOT || path.resolve(
   process.cwd(),
   "../wm-vorhersager/artifacts/sports-experiments/mlb-elo-v2-confirmatory-v2"
@@ -2079,18 +2095,18 @@ function isBerlinXetraTradingWindow(now = new Date()) {
 
 function createDefaultNoahTile(key) {
   const labels = {
-    cycle: "Noah Zyklus",
-    weekly_pnl: "Wochen PnL",
-    daily_pnl: "Tages PnL",
-    trades_today: "Trades Heute",
-    live_markets: "Live Markt"
+    cycle: "NOAH 7",
+    daily_pnl: "N95 Heute",
+    trades_today: "ORB13 Heute",
+    weekly_pnl: "N95 Woche",
+    live_markets: "ORB13 Woche"
   };
   return {
     key,
     label: labels[key] || "Noah",
     status: "idle",
-    line1: "Keine Daten",
-    line2: "Warte auf Probe",
+    line1: "—",
+    line2: "keine Daten",
     footer: "--:--",
     updatedAt: nowIso()
   };
@@ -3110,17 +3126,39 @@ async function probeNoahMonitor(selectedMarket = "combined") {
   }
   try {
     const noah7BaseUrl = process.env.CODEX_MONITOR_NOAH7_BASE_URL || DEFAULT_NOAH7_BASE_URL;
+    let noah7ProbeError = null;
     try {
       const payload = await fetchJson(new URL("api/streamdeck", noah7BaseUrl).toString(), { timeoutMs: 8_000 });
       const tiles = Array.isArray(payload?.tiles) ? payload.tiles : [];
       const ids = new Set(tiles.map(tile => tile?.tile_id));
-      if (payload?.contract !== "noah7.streamdeck.v1" || payload?.schema_version !== 1 || tiles.length !== 5
-          || ids.size !== 5 || tiles.some(tile => tile?.read_only !== true)) {
-        throw new Error("Noah 7 Stream-Deck-Vertrag ungültig");
+      const isV2 = payload?.contract === "noah7.streamdeck.v2"
+        && payload?.schema_version === 2
+        && tiles.length === 5
+        && ids.size === 5
+        && NOAH7_V2_TILE_IDS.every(id => ids.has(id))
+        && tiles.every(tile => tile?.read_only === true);
+      if (isV2) {
+        return { checked_at: tiles[0]?.observed_at || nowIso(), noah7_tiles: tiles, noah7_contract: "v2", warnings: {} };
       }
-      return { checked_at: tiles[0]?.observed_at || nowIso(), noah7_tiles: tiles, warnings: {} };
-    } catch {
-      // Preserve the proven legacy observer as a fail-safe during cutover.
+      const isV1 = payload?.contract === "noah7.streamdeck.v1"
+        && payload?.schema_version === 1
+        && tiles.length === 5
+        && ids.size === 5
+        && tiles.every(tile => tile?.read_only === true);
+      if (isV1) {
+        return { checked_at: tiles[0]?.observed_at || nowIso(), noah7_tiles: tiles, noah7_contract: "v1", warnings: {} };
+      }
+      noah7ProbeError = new Error("Noah 7 Stream-Deck-Vertrag ungültig");
+    } catch (error) {
+      noah7ProbeError = error instanceof Error ? error : new Error(String(error));
+    }
+    if (process.env.CODEX_MONITOR_NOAH7_LEGACY_FALLBACK !== "1") {
+      return {
+        checked_at: nowIso(),
+        noah7_offline: true,
+        noah7_offline_reason: noah7ProbeError instanceof Error ? noah7ProbeError.message : String(noah7ProbeError),
+        warnings: {}
+      };
     }
     const baseUrl = getNoahMonitorBaseUrl();
     if (!baseUrl) {
@@ -3252,14 +3290,30 @@ function getImmediateNoahMonitor() {
 }
 
 function buildNoahTiles(summary) {
+  if (summary?.noah7_offline) {
+    const priorTiles = lastNoah7Tiles?.tiles;
+    const sinceLabel = lastNoah7Tiles?.checkedAt ? formatBerlinTime(lastNoah7Tiles.checkedAt) : null;
+    const updatedAt = summary.checked_at || nowIso();
+    return NOAH_TILE_ORDER.map(key => {
+      if (key === "cycle") {
+        return {
+          key: "cycle",
+          label: "NOAH 7",
+          status: "idle",
+          line1: "OFFLINE",
+          line2: "kein Kontakt",
+          footer: sinceLabel ? `seit ${sinceLabel}` : "seit ?",
+          updatedAt
+        };
+      }
+      const prior = priorTiles?.find(tile => tile.key === key);
+      const base = prior ? { ...prior } : createDefaultNoahTile(key);
+      // Money tiles keep their last value but must read as stale at a glance.
+      return { ...base, status: "idle", footer: sinceLabel ? `alt ${sinceLabel}` : "alt ?", updatedAt };
+    });
+  }
   if (Array.isArray(summary?.noah7_tiles)) {
-    const keyById = {
-      session: "cycle",
-      evidence_trixie: "weekly_pnl",
-      native95: "daily_pnl",
-      orb13: "trades_today",
-      broker: "live_markets"
-    };
+    const keyById = summary.noah7_contract === "v2" ? NOAH7_V2_KEY_BY_ID : NOAH7_V1_KEY_BY_ID;
     const statusFor = tile => {
       const lifecycle = String(tile?.lifecycle || "").toLowerCase();
       const severity = String(tile?.severity || "").toLowerCase();
@@ -3274,14 +3328,17 @@ function buildNoahTiles(summary) {
       return [key, {
         key,
         label: String(tile.title || tile.tile_id).slice(0, 18),
-        status: statusFor(tile),
+        status: tile.status || statusFor(tile),
         line1: String(tile.lines?.[0] || tile.lifecycle || "-").slice(0, 18),
         line2: String(tile.lines?.[1] || tile.reason_code || "-").slice(0, 18),
         footer: String(tile.footer || tile.freshness || "-").slice(0, 18),
+        valueEur: tile.value_eur ?? null,
         updatedAt: tile.observed_at || summary.checked_at || nowIso()
       }];
     }).filter(([key, tile]) => key && tile));
-    return NOAH_TILE_ORDER.map(key => ({ ...createDefaultNoahTile(key), ...(byKey[key] || {}) }));
+    const mappedTiles = NOAH_TILE_ORDER.map(key => ({ ...createDefaultNoahTile(key), ...(byKey[key] || {}) }));
+    lastNoah7Tiles = { tiles: mappedTiles, checkedAt: summary.checked_at || nowIso() };
+    return mappedTiles;
   }
   const updatedAt = summary?.checked_at || nowIso();
   const degraded = Boolean(summary?.stale_reason || Object.keys(summary?.warnings || {}).length);

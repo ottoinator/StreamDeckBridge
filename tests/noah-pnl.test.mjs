@@ -135,10 +135,39 @@ test("Noah streamdeck tile contract drives PnL, trades, cycle, and live markets 
   assert.equal(tiles.find(tile => tile.key === "live_markets").footer, "View COMB");
 });
 
-test("Noah 7 tiles preserve UUID slots and separate lifecycle from negative PnL", () => {
+function noah7V2Tiles(observed) {
+  return [
+    { tile_id: "health", title: "NOAH 7", lifecycle: "open", freshness: "fresh", severity: "info", status: "ok", lines: ["OK", "Handel"], footer: "13:30", observed_at: observed, read_only: true, value_eur: null },
+    { tile_id: "native95_day", title: "N95 Heute", lifecycle: "done", freshness: "fresh", severity: "info", status: "ok", lines: ["+11,64 EUR", "gebucht"], footer: "09.09.", observed_at: observed, read_only: true, value_eur: 11.64 },
+    { tile_id: "orb13_day", title: "ORB13 Heute", lifecycle: "preopen_ready", freshness: "fresh", severity: "info", status: "warn", lines: ["-4,20 EUR", "offen"], footer: "09.09.", observed_at: observed, read_only: true, value_eur: -4.2 },
+    { tile_id: "native95_week", title: "N95 Woche", lifecycle: "done", freshness: "fresh", severity: "info", status: "ok", lines: ["+30,00 EUR", "4 Tg gebucht"], footer: "KW 37", observed_at: observed, read_only: true, value_eur: 30 },
+    { tile_id: "orb13_week", title: "ORB13 Woche", lifecycle: "blocked", freshness: "unknown", severity: "warning", status: "error", lines: ["-10,00 EUR", "1 fehlt"], footer: "KW37 1 fehlt", observed_at: observed, read_only: true, value_eur: -10 }
+  ];
+}
+
+test("Noah 7 v2 tiles map ids to keys and carry status/value", () => {
   const observed = "2026-09-09T13:30:00Z";
   const tiles = buildNoahTiles({
     checked_at: observed,
+    noah7_contract: "v2",
+    noah7_tiles: noah7V2Tiles(observed)
+  });
+  assert.deepEqual(tiles.map(tile => tile.key), ["cycle", "weekly_pnl", "daily_pnl", "trades_today", "live_markets"]);
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").label, "N95 Heute");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "ok");
+  assert.equal(tiles.find(tile => tile.key === "daily_pnl").valueEur, 11.64);
+  assert.equal(tiles.find(tile => tile.key === "trades_today").status, "warn");
+  assert.equal(tiles.find(tile => tile.key === "trades_today").valueEur, -4.2);
+  assert.equal(tiles.find(tile => tile.key === "live_markets").label, "ORB13 Woche");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").status, "error");
+  assert.equal(tiles.find(tile => tile.key === "live_markets").valueEur, -10);
+});
+
+test("Noah 7 v1 tiles preserve UUID slots and separate lifecycle from negative PnL", () => {
+  const observed = "2026-09-09T13:30:00Z";
+  const tiles = buildNoahTiles({
+    checked_at: observed,
+    noah7_contract: "v1",
     noah7_tiles: [
       { tile_id: "session", title: "Session", lifecycle: "open", freshness: "fresh", severity: "info", lines: ["OPEN", "Next 09:32"], footer: "2026-09-09", observed_at: observed },
       { tile_id: "native95", title: "Native95", lifecycle: "done", freshness: "fresh", severity: "info", lines: ["BOOKED", "PnL -95 EUR"], footer: "fresh", observed_at: observed },
@@ -152,6 +181,37 @@ test("Noah 7 tiles preserve UUID slots and separate lifecycle from negative PnL"
   assert.equal(tiles.find(tile => tile.key === "daily_pnl").status, "ok");
   assert.equal(tiles.find(tile => tile.key === "weekly_pnl").status, "warn");
   assert.equal(tiles.find(tile => tile.key === "live_markets").label, "Broker");
+});
+
+test("Noah 7 offline keeps last known tiles idle except the health tile", () => {
+  const observed = "2026-09-09T13:30:00Z";
+  buildNoahTiles({
+    checked_at: observed,
+    noah7_contract: "v2",
+    noah7_tiles: noah7V2Tiles(observed)
+  });
+
+  const tiles = buildNoahTiles({
+    checked_at: "2026-09-09T14:05:00Z",
+    noah7_offline: true,
+    noah7_offline_reason: "timeout"
+  });
+
+  const cycleTile = tiles.find(tile => tile.key === "cycle");
+  assert.equal(cycleTile.label, "NOAH 7");
+  assert.equal(cycleTile.status, "idle");
+  assert.equal(cycleTile.line1, "OFFLINE");
+  assert.equal(cycleTile.line2, "kein Kontakt");
+  assert.match(cycleTile.footer, /^seit \d{2}:\d{2}$/);
+
+  const dailyTile = tiles.find(tile => tile.key === "daily_pnl");
+  assert.equal(dailyTile.status, "idle");
+  assert.equal(dailyTile.label, "N95 Heute");
+  assert.equal(dailyTile.line1, "+11,64 EUR");
+
+  const weekTile = tiles.find(tile => tile.key === "live_markets");
+  assert.equal(weekTile.status, "idle");
+  assert.equal(weekTile.label, "ORB13 Woche");
 });
 
 test("Noah live-market tile reflects selected single-market view without changing trading truth", () => {

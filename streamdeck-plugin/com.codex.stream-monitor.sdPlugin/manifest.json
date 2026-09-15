@@ -118,10 +118,10 @@
       ]
     },
     {
-      "Name": "Noah Cycle",
+      "Name": "Noah 7 Zustand",
       "UUID": "com.codex.stream-monitor.noah.cycle",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current Noah cycle and the countdown to the next cycle.",
+      "Tooltip": "Zeigt, ob Noah 7 gesund ist (grün/gelb/rot/grau).",
       "Controllers": [
         "Keypad"
       ],
@@ -133,10 +133,10 @@
       ]
     },
     {
-      "Name": "Noah Weekly PnL",
+      "Name": "Native95 Woche",
       "UUID": "com.codex.stream-monitor.noah.weekly-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current weekly Noah PnL.",
+      "Tooltip": "Wochen-PnL der Lane Native95 (Woche bis heute).",
       "Controllers": [
         "Keypad"
       ],
@@ -148,10 +148,10 @@
       ]
     },
     {
-      "Name": "Noah Daily PnL",
+      "Name": "Native95 Heute",
       "UUID": "com.codex.stream-monitor.noah.daily-pnl",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows the current daily Noah PnL.",
+      "Tooltip": "Tages-PnL der Lane Native95.",
       "Controllers": [
         "Keypad"
       ],
@@ -163,10 +163,10 @@
       ]
     },
     {
-      "Name": "Noah Trades Today",
+      "Name": "ORB13 Heute",
       "UUID": "com.codex.stream-monitor.noah.trades-today",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Shows how many trades are open and closed today.",
+      "Tooltip": "Tages-PnL der Lane ORB13.",
       "Controllers": [
         "Keypad"
       ],
@@ -178,10 +178,10 @@
       ]
     },
     {
-      "Name": "Noah Live Markets",
+      "Name": "ORB13 Woche",
       "UUID": "com.codex.stream-monitor.noah.live-markets",
       "Icon": "imgs/actions/slot",
-      "Tooltip": "Cycles read-only through Default ORB13, both Mamba what-if challengers, MLB Elo V2, and MLB Teamform.",
+      "Tooltip": "Wochen-PnL der Lane ORB13 (Woche bis heute).",
       "Controllers": [
         "Keypad"
       ],
